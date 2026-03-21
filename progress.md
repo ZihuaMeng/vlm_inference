@@ -1,5 +1,27 @@
 # Progress Log
 
+## 2026-03-21 — Milestone 7: Multi-Image Condition Redundancy Characterization
+
+### Completed
+- Obtained B200 node, verified GPU (NVIDIA B200, 183 GB), activated existing venv
+- Inspected pipeline source code (`pipeline_qwenimage_edit_plus.py`) and transformer source (`transformer_qwenimage.py`) to understand multi-image token handling
+- Documented mechanical structure: multi-image = sequence concatenation, no special cross-image mechanism, shared timestep modulation (zero-cond), shared RoPE frame index (-1)
+- Wrote m7_multi_image.py instrumentation script measuring: token counts, compute scaling, cross-image hidden state similarity (5 sampled blocks × 40 steps), attention region distribution (5 blocks × 6 sampled steps), and temporal/CFG redundancy per image count
+- Ran instrumented forward passes for 1, 2, 3 images (40 steps each, TRUE_CFG_SCALE=4.0)
+- Saved raw data to `PROJECT_BLUE_ROOT/profiling/multi_image_conditioning/m7_results.json`
+- Updated findings.md with full 7-section analysis and bottom-line characterization
+
+### Key Results
+- **Token scaling**: Each image adds exactly 4,096 condition tokens + ~200 text tokens. Linear growth.
+- **Compute scaling**: O(S^1.4) — super-linear, sub-quadratic. 1img=26.9s, 2img=47.3s (1.76x), 3img=72.3s (2.69x). FlashAttention keeps effective exponent below 2.0.
+- **VRAM**: Constant ~63 GB across all image counts. No memory pressure from more images.
+- **Cross-image hidden states**: Near-orthogonal (cos ≈ 0) at blocks 0-44. **No hidden state redundancy.** Block 59 converges all tokens (cos=0.999) — architectural normalizer.
+- **Attention distribution**: Noise tokens 88-95% self-attentive. Image tokens 30-40% self, 50-60% noise, only 10-15% cross-image. **Minimal cross-image attention.**
+- **Temporal/CFG redundancy unchanged**: Three-phase temporal pattern (converge→plateau→diverge) and CFG plateau (cos >0.999 for steps 3-38) persist identically across 1/2/3 images. Same skip schedules apply.
+- **Bottom line**: Multi-image conditioning does NOT create exploitable redundancy. Differentiation must come from combining temporal/CFG axes adaptively. Multi-image cases benefit MORE from existing methods (larger absolute savings due to higher per-step cost).
+
+---
+
 ## 2026-03-21 — Milestone 6: Temporal Step-Caching Prototype (Block-Aware)
 
 ### Completed

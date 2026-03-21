@@ -2,6 +2,229 @@
 
 ---
 
+# Milestone 7: Multi-Image Condition Redundancy Characterization
+
+## 1. Pipeline Mechanical Structure for Multi-Image Input
+
+### How Multiple Images Enter the Pipeline
+
+The `QwenImageEditPlusPipeline` processes multiple input images through two parallel paths:
+
+**Path A — Text Encoder (Qwen2.5-VL-7B):**
+- Each image gets a template token: `"Picture N: <|vision_start|><|image_pad|><|vision_end|>"`
+- All templates are concatenated into a single prompt string: `"Picture 1: ... Picture 2: ... <user prompt>"`
+- Qwen2.5-VL processes this as a multi-image understanding task
+- Output: `prompt_embeds` — text encoder hidden states. Token count grows with image count due to vision tokens.
+
+**Path B — VAE Latent Encoding:**
+- Each image is resized to `VAE_IMAGE_SIZE = 1024*1024` area (maintaining aspect ratio)
+- Each image is independently VAE-encoded to latent space (shape: `[1, 1, 16, H/8, W/8]`)
+- Each image's latents are packed into 2x2 patch tokens (sequence of `(H/16)*(W/16)` tokens, each 64-dim)
+- All image latents are **concatenated along the sequence dimension** (dim=1)
+
+### Token Structure Entering the Transformer
+
+The transformer receives `hidden_states = [noise_latents, img1_latents, img2_latents, ...]`:
+
+| Component | Token Count (1024x1024 output, 1024x1024 input) | Notes |
+|-----------|--------------------------------------------------|-------|
+| Noise latents | `(H/16)*(W/16)` = 4096 (for 1024x1024) | Output image being denoised |
+| Per-image latents | `(H_i/16)*(W_i/16)` ≈ 4096 (for 1024x1024 input) | Each condition image |
+| **Total image tokens** | **4096 + N × ~4096** | Linear in image count |
+
+### Positional Encoding (3D RoPE)
+
+- **Noise latents**: Positive frame index (idx=0), positive spatial (h,w) positions
+- **ALL condition images**: Negative frame index (-1 via `_compute_condition_freqs`), positive spatial (h,w) positions
+- Multiple condition images share the same frame index (-1). They are distinguished only by their position in the concatenated sequence, not by any per-image identifier in RoPE.
+
+### Timestep Modulation (`zero_cond_t`)
+
+- `modulate_index = [0]*noise_tokens + [1]*all_condition_tokens`
+- Index 0 (noise): modulated by full timestep embedding
+- Index 1 (conditions): modulated by **zero timestep** embedding
+- ALL condition images receive identical timestep modulation — no per-image differentiation
+
+### Joint Attention Mechanism
+
+In each of the 60 transformer blocks:
+1. Text stream and image stream are separately projected to Q, K, V
+2. Concatenated: `[text_Q, image_Q]`, `[text_K, image_K]`, `[text_V, image_V]`
+3. Full scaled dot-product attention over the joint sequence
+4. Output split back to text and image parts
+
+The joint attention sequence = `[text_tokens, noise_latents, img1_latents, img2_latents, ...]`
+
+**Attention cost**: O(S²) where S = text_len + noise_tokens + sum(image_tokens). Adding each image adds ~4096 tokens, causing quadratic growth in attention compute.
+
+### Key Architectural Summary
+
+Multi-image conditioning is **pure sequence concatenation** with:
+- No dedicated cross-image attention mechanism
+- No per-image positional differentiation (all share frame=-1)
+- No per-image timestep modulation (all get zero-timestep)
+- Cross-image interaction is entirely implicit through joint attention
+
+## 2. Token Counts
+
+| Config | Noise Tokens | Per-Image Cond | Total Cond | Total Image-Stream | Text (cond) | Text (neg) |
+|--------|-------------|----------------|------------|-------------------|-------------|------------|
+| 1 image | 4,096 | 4,096 | 4,096 | **8,192** | 217 | 209 |
+| 2 images | 4,096 | 4,096 | 8,192 | **12,288** | 427 | 412 |
+| 3 images | 4,096 | 4,096 | 12,288 | **16,384** | 628 | 615 |
+
+Each additional image adds exactly **4,096 condition tokens** to the image stream (for 512×512 input → 1024×1024 VAE encoding → 64×64 latent → 32×32 packed patches = 1024... wait, actually the tokens are computed from VAE_IMAGE_SIZE=1024×1024, so H/16 × W/16 = 64×64 = 4096). Each image also adds ~200 text encoder tokens (the vision tokens from Qwen2.5-VL).
+
+The joint attention sequence (text + image-stream) grows from **~8,400 to ~17,000 tokens** going from 1 to 3 images.
+
+## 3. Compute Scaling Analysis
+
+| Config | Total (s) | Mean Step (ms) | Per-Pass (ms) | VRAM (GB) | Relative Cost |
+|--------|-----------|----------------|---------------|-----------|---------------|
+| 1 image | 26.89 | 672 | 336 | 63.20 | **1.000x** |
+| 2 images | 47.25 | 1,181 | 591 | 62.49 | **1.757x** |
+| 3 images | 72.29 | 1,807 | 904 | 63.52 | **2.688x** |
+
+### Scaling Characterization
+
+The scaling is **super-linear but sub-quadratic** (~O(S^1.4)):
+
+| Metric | 2img/1img | 3img/1img |
+|--------|-----------|-----------|
+| Sequence length ratio | 1.51x | 2.02x |
+| Cost ratio (observed) | 1.76x | 2.69x |
+| If linear (O(S)) | 1.51x | 2.02x |
+| If quadratic (O(S²)) | 2.29x | 4.09x |
+| **Observed scaling exponent** | **1.37** | **1.40** |
+
+The ~O(S^1.4) scaling is consistent with FlashAttention: the FLOP count is O(S²) but the memory-efficient implementation achieves better-than-quadratic wall-clock scaling at these sequence lengths. From M3, joint attention accounts for ~75.8% of compute, and the remaining linear-scaling components (MLP, projections) pull the effective exponent below 2.0.
+
+**VRAM is essentially constant** (~63 GB) across image counts. The additional condition tokens are relatively small compared to the model parameters (57.8 GB), and FlashAttention avoids materializing the full attention matrix.
+
+## 4. Cross-Image Hidden State Similarity
+
+At step 20 (mid-plateau), cosine similarity between hidden states of different image condition tokens:
+
+### 2-Image Case
+
+| Block | img1↔img2 | noise↔img1 | noise↔img2 |
+|-------|-----------|------------|------------|
+| 0 (early) | **-0.067** | 0.092 | 0.095 |
+| 14 | 0.078 | 0.100 | 0.146 |
+| 29 (mid) | 0.057 | 0.102 | 0.120 |
+| 44 (dynamic) | 0.079 | 0.197 | 0.215 |
+| 59 (final) | **0.999** | 0.999 | 0.999 |
+
+### 3-Image Case
+
+| Block | img1↔img2 | img1↔img3 | img2↔img3 | noise↔img1 | noise↔img2 | noise↔img3 |
+|-------|-----------|-----------|-----------|------------|------------|------------|
+| 0 | **-0.174** | -0.079 | **-0.278** | 0.080 | 0.157 | 0.044 |
+| 14 | 0.047 | 0.147 | 0.133 | 0.122 | 0.200 | 0.143 |
+| 29 | -0.011 | 0.081 | -0.087 | 0.104 | 0.150 | 0.088 |
+| 44 | -0.004 | 0.089 | -0.058 | 0.193 | 0.245 | 0.185 |
+| 59 | **0.999** | 0.999 | 0.999 | 0.999 | 0.999 | 0.999 |
+
+### Interpretation
+
+**Blocks 0–44**: Cross-image hidden state similarity is near zero or negative (range: -0.28 to +0.15). The transformer maintains **highly differentiated, nearly orthogonal representations** for different input images. There is no hidden-state redundancy — each image carries genuinely distinct information through the computational pipeline.
+
+**Block 59** (final block): All tokens converge to near-identical representations (cos ~0.999). This is the normalizing/stabilizing block identified in M4 — it collapses all representations to a common subspace, which is its architectural function.
+
+**Block 44** (most dynamic block): Shows the highest noise↔image similarity (~0.20), suggesting this is where condition information most actively influences the noise prediction. But cross-image similarity remains near zero.
+
+**Key conclusion**: There is **no exploitable cross-image hidden state redundancy** in blocks 0–44. The representations are genuinely different, not redundantly similar.
+
+## 5. Attention Region Distribution Analysis
+
+### 2-Image Case (Block 29)
+
+| Step | noise→noise | noise→img1 | noise→img2 | img1→self | img1→img2 | img1→noise | img2→self | img2→img1 | img2→noise |
+|------|-------------|------------|------------|-----------|-----------|------------|-----------|-----------|------------|
+| 0 | 88.2% | 5.7% | 6.1% | 29.2% | 17.9% | 52.8% | 35.0% | 11.9% | 53.0% |
+| 5 | 94.4% | 3.5% | 2.1% | 34.4% | 13.0% | 52.6% | 29.0% | 14.0% | 57.1% |
+| 15 | 94.6% | 3.2% | 2.2% | 36.1% | 11.8% | 52.1% | 29.7% | 13.1% | 57.2% |
+| 25 | 93.1% | 3.7% | 3.2% | 37.5% | 12.6% | 49.9% | 30.4% | 15.1% | 54.5% |
+| 39 | 91.4% | 4.9% | 3.7% | 29.9% | 11.7% | 58.4% | 22.4% | 13.0% | 64.6% |
+
+### 3-Image Case (Block 29)
+
+| Step | noise→noise | noise→img1 | noise→img2 | noise→img3 | img1→self | img1→others | img2→self | img2→others | img3→self | img3→others |
+|------|-------------|------------|------------|------------|-----------|-------------|-----------|-------------|-----------|-------------|
+| 0 | 84.2% | 5.1% | 5.6% | 5.1% | 29.0% | 28.3% | 40.0% | 33.1% | 38.8% | 20.6% |
+| 15 | 93.4% | 3.4% | 1.2% | 2.0% | 37.2% | 18.6% | 35.9% | 26.2% | 33.7% | 22.1% |
+| 25 | 93.2% | 3.6% | 1.3% | 2.0% | 36.8% | 18.9% | 38.7% | 22.4% | 34.2% | 23.8% |
+
+### Attention Pattern Key Findings
+
+1. **Noise tokens are overwhelmingly self-attentive**: 88–95% of noise token attention goes to other noise tokens. Only 3–6% of attention goes to each condition image. This means the denoising computation largely operates on its own representation, with condition images providing only a small steering signal.
+
+2. **Image tokens attend primarily to themselves and noise**: Each image attends ~30–40% to its own tokens and ~50–60% to noise tokens. Cross-image attention is only ~10–15% per other image.
+
+3. **Cross-image attention is minimal and roughly symmetric**: img1→img2 ≈ img2→img1 ≈ 10–15%. The model does not show strong directional cross-image attention patterns.
+
+4. **The attention pattern is stable across denoising steps**: The distribution barely changes between steps 5–35 (the plateau region), consistent with M4's temporal redundancy findings.
+
+5. **At step 0 and step 39**, attention is slightly more distributed (lower noise self-attention), consistent with M4's divergence at trajectory endpoints.
+
+## 6. Temporal/CFG Redundancy Interaction with Image Count
+
+### Temporal Redundancy (step-to-step cosine similarity of noise prediction)
+
+| Step | 1 image | 2 images | 3 images | Pattern |
+|------|---------|----------|----------|---------|
+| 1 | 0.9957 | 0.9805 | 0.9893 | Convergence |
+| 5 | 0.9992 | 0.9996 | 0.9972 | Entering plateau |
+| 10 | 0.9999 | 0.9998 | 0.9999 | Deep plateau |
+| 20 | 0.9999 | 0.9999 | 0.9999 | Peak plateau |
+| 30 | 0.9999 | 0.9999 | 0.9999 | Plateau |
+| 35 | 0.9997 | 0.9995 | 0.9998 | Beginning exit |
+| 39 | **0.890** | **0.816** | **0.872** | Final divergence |
+
+**The three-phase temporal pattern is preserved across all image counts.** Plateau region (steps 5–30) remains cos >0.999 regardless of image count. The final-step divergence (step 39) varies somewhat but is always present.
+
+### CFG Redundancy (cond-vs-uncond cosine similarity)
+
+| Step | 1 image | 2 images | 3 images | Pattern |
+|------|---------|----------|----------|---------|
+| 0 | 0.975 | 0.976 | 0.958 | Early divergence |
+| 2 | 0.996 | 0.995 | 0.994 | Converging |
+| 5 | 0.999 | 0.999 | 0.999 | Plateau |
+| 20 | 0.9999 | 0.9999 | 0.9999 | Deep plateau |
+| 39 | 0.996 | 0.993 | 0.999 | Late divergence |
+
+**The CFG redundancy pattern is also preserved.** The unconditional pass produces nearly identical output to the conditional pass for ~90% of the trajectory, regardless of image count.
+
+### Conclusion on Interaction
+
+Adding more images does **not** shift the plateau boundaries or change the CFG divergence structure. The temporal and CFG acceleration strategies developed in M5/M6 are **directly applicable** to multi-image cases without modification. The same skip schedules (e.g., CFG skip steps 3–38, temporal cache steps 10–25) should be equally effective regardless of image count.
+
+## 7. Bottom-Line Characterization
+
+### Does multi-image conditioning create exploitable redundancy?
+
+**No.** Multi-image conditioning introduces:
+
+1. **Compute overhead (O(S^1.4))** — but no novel redundancy to exploit. The cost comes from a longer attention sequence, not from redundant computation.
+
+2. **Orthogonal hidden states** — different images maintain genuinely differentiated representations (cos ≈ 0) through blocks 0–44. There is no "processing the same thing twice" to skip.
+
+3. **Minimal cross-image attention** — only 10–15% of each image's attention goes to other images. The model does not waste compute on redundant cross-image interactions.
+
+4. **Unchanged temporal/CFG redundancy** — the existing acceleration axes (CFG-skip and temporal caching) apply identically regardless of image count.
+
+### Implications for Method Design (M8)
+
+1. **No third acceleration axis from multi-image redundancy.** The differentiation must come from combining and adaptively controlling the temporal/CFG axes, not from a new redundancy source.
+
+2. **Multi-image cases benefit MORE from existing acceleration.** Since the per-step cost is higher (1.76x for 2 images, 2.69x for 3 images), the same fractional speedup from CFG-skip or temporal caching produces a larger absolute time savings.
+
+3. **The attention sparsity pattern (noise ~90% self-attentive) suggests a potential optimization**: sparse attention over condition tokens. But this is a compute-efficiency improvement, not a redundancy-exploitation strategy, and would require custom kernels — outside current scope.
+
+4. **The VRAM headroom is maintained**: even with 3 images, peak VRAM is only ~63.5 GB (34.7% of 183 GB), leaving >100 GB for any caching or method overhead.
+
+---
+
 # Milestone 6: Temporal Step-Caching Prototype (Block-Aware)
 
 ## Bottom-Line Summary

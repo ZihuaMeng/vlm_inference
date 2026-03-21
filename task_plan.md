@@ -130,3 +130,40 @@ Started 2026-03-21. Temporal axis acceleration: cache transformer outputs across
 3. [x] Run experiments: baseline + 3 schedules × 5 test cases
 4. [x] Analyze results, cross-axis comparison with M5
 5. [x] Update findings.md and progress.md
+
+## Milestone 7: Multi-Image Condition Redundancy Characterization — COMPLETED
+
+Started 2026-03-21. Determine whether multi-image conditioning introduces structured redundancy absent in single-image conditioning.
+
+### Scientific Questions
+1. How are multiple image conditions represented internally? (Concatenated? Independent? Where does cross-image interaction occur?)
+2. How does compute cost scale with input image count? (Linear? Super-linear?)
+3. Is there quantifiable redundancy in how the model processes multi-image conditions? (Attention convergence? Hidden state similarity?)
+4. Does the temporal or CFG redundancy structure change with more images?
+5. Does multi-image conditioning create exploitable redundancy, and if so, what kind?
+
+### Mechanical Structure (from code reading)
+- **Text encoder**: Each image gets `"Picture N: <|vision_start|><|image_pad|><|vision_end|>"` in prompt. Qwen2.5-VL processes all images jointly.
+- **VAE path**: Each image individually VAE-encoded, packed to 2x2 patch tokens, then all image latents **concatenated along sequence dimension** (dim=1).
+- **Transformer input**: `hidden_states = [noise_latents, img1_latents, img2_latents, ...]` (single concatenated sequence).
+- **Timestep modulation** (`zero_cond_t`): noise tokens get full timestep modulation (index=0), ALL condition image tokens get zero-timestep modulation (index=1). No per-image differentiation.
+- **RoPE**: Output noise tokens get positive frame index. ALL condition images get negative frame index (-1). Condition images share frame position, differ only in spatial (h,w) positions.
+- **Joint attention**: Text and image streams separately projected to Q,K,V, then concatenated `[text, image]` for full joint attention. Attention cost is O(n²) in total sequence length.
+- **Output**: Only the first `noise_latents.size(1)` tokens of transformer output used as noise prediction.
+
+### Key Architectural Insight
+Multi-image conditioning is pure sequence concatenation with no special cross-image mechanism. Adding N images linearly increases sequence length, causing quadratic attention cost scaling. Cross-image interaction is entirely implicit through the joint attention mechanism.
+
+### Answers to Scientific Questions
+1. **How are multi-image conditions represented?** Pure sequence concatenation. Each image → 4,096 tokens, all concatenated along dim=1. Shared frame index (-1), shared zero-timestep modulation. No special cross-image mechanism.
+2. **How does compute scale?** O(S^1.4): 1img=26.9s, 2img=47.3s (1.76x), 3img=72.3s (2.69x). Super-linear due to quadratic attention, sub-quadratic due to FlashAttention + linear MLP cost.
+3. **Is there cross-image redundancy?** No. Hidden states are near-orthogonal (cos ≈ 0) at blocks 0-44. Cross-image attention is only 10-15%. Each image carries genuinely distinct information.
+4. **Does temporal/CFG redundancy change with image count?** No. Same three-phase temporal pattern, same CFG plateau. Skip schedules transfer directly.
+5. **Bottom line?** No exploitable multi-image redundancy exists. Differentiation must come from adaptive temporal/CFG combination.
+
+### Tasks
+1. [x] Inspect pipeline and transformer code for multi-image handling
+2. [x] Write m7_multi_image.py instrumentation script
+3. [x] Run instrumented passes for 1, 2, 3 images
+4. [x] Analyze results: compute scaling, attention, cross-image redundancy, temporal/CFG interaction
+5. [x] Update findings.md and progress.md with full analysis
