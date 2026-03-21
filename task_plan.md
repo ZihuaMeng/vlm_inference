@@ -75,3 +75,58 @@ Completed 2026-03-21. See findings.md for full results.
 2. [x] Write m4_redundancy.py instrumentation script
 3. [x] Run warmup + instrumented pass on B200, collect metrics
 4. [x] Analyze results, update findings.md and progress.md with redundancy profiles
+
+## Milestone 5: CFG-Skip Prototype + Robustness — COMPLETED
+
+Completed 2026-03-21. See findings.md for full results.
+
+### Answers to Scientific Questions
+1. **What speedup?** 1.82x consistent across all 5 test cases. Matches theoretical 80/44 = 1.818x.
+2. **Does it degrade quality?** Yes. SSIM 0.73–0.94 (mean 0.86). 3/5 moderate, 2/5 notable degradation.
+3. **Consistent across test cases?** Speedup: perfectly consistent. Quality: varies — complex/textured prompts degrade more.
+4. **Simplest effective schedule?** v1 drop-CFG (steps 3–38 skip) is simplest. v2 cached-uncond reuse failed catastrophically. Conservative schedule (steps 5–34 skip) slightly better quality, lower speedup (1.60x).
+
+### Tasks
+1. [x] Update task_plan.md with Milestone 5 objectives
+2. [x] Activate venv, verify environment, install scikit-image for SSIM
+3. [x] Write m5_cfg_skip.py (v1 drop-CFG) + m5_cfg_skip_v2.py (cached uncond reuse)
+4. [x] Run experiments: v1 aggressive (5 cases), v2 (5 cases), v1 conservative (2 worst cases)
+5. [x] Analyze results, update findings.md and progress.md
+
+## Milestone 6: Temporal Step-Caching Prototype (Block-Aware) — COMPLETED
+
+Started 2026-03-21. Temporal axis acceleration: cache transformer outputs across denoising steps.
+
+### Scientific Questions
+1. What speedup does temporal step-caching achieve?
+2. Does block-aware caching (recompute dynamic blocks, cache stable) outperform uniform caching?
+3. What is the quality cost, and which test cases degrade?
+4. Do quality failure modes overlap with M5's CFG-skip failures (same hard cases)?
+5. Is degradation correlated with input count or edit complexity?
+
+### Design Decisions (from M4 block-level data)
+- **Block 44**: Most dynamic (temporal cos ~0.973 in plateau). Always recompute.
+- **Block 59**: Most stable (cos ~0.9999). Safe to cache.
+- **Blocks 0, 14**: Very stable (cos >0.9996). Safe to cache.
+- **Block 29**: Moderately stable (cos ~0.998). Safe to cache.
+- **Dynamic zone**: Blocks 40-59 always recomputed (conservative — includes block 44 and all downstream so fresh output reaches norm_out/proj_out)
+- **Cached zone**: Blocks 0-39 (all measured blocks in this range have cos >0.996)
+
+### Three Schedules
+- **A: Aggressive uniform** — Cache steps 5-30 (skip entire transformer, reuse prev noise pred). 28 passes vs 80 baseline → ~2.86x theoretical.
+- **B: Conservative uniform** — Cache steps 10-25 (narrower window). 48 passes vs 80 → ~1.67x theoretical.
+- **C: Block-aware** — Cache steps 5-30, but recompute blocks 40-59 (dynamic zone). Cache blocks 0-39. ~1.7-1.8x theoretical.
+
+### Answers to Scientific Questions
+1. **What speedup?** Aggressive uniform: 2.86x. Conservative uniform: 1.66x. Block-aware: 1.76x.
+2. **Does block-aware outperform uniform?** No. Block-aware FAILED (SSIM 0.37). Uniform conservative is the best method (SSIM 0.93).
+3. **Quality cost?** Conservative uniform: SSIM 0.89-0.97 (mean 0.93). Aggressive: SSIM 0.65-0.92 (mean 0.78).
+4. **Overlap with M5 failures?** Yes. tc3 (complex scene) and tc5 (texture) are hardest on both axes.
+5. **Input count correlation?** No. Degradation driven by edit complexity, not image count.
+
+### Tasks
+1. [x] Update task_plan.md with M6 objectives
+2. [x] Write m6_temporal_cache.py
+3. [x] Run experiments: baseline + 3 schedules × 5 test cases
+4. [x] Analyze results, cross-axis comparison with M5
+5. [x] Update findings.md and progress.md

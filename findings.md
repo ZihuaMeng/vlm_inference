@@ -2,6 +2,242 @@
 
 ---
 
+# Milestone 6: Temporal Step-Caching Prototype (Block-Aware)
+
+## Bottom-Line Summary
+
+**Conservative uniform temporal caching delivers 1.66x speedup with better quality than M5's CFG-skip (mean SSIM 0.93 vs 0.86).** Aggressive uniform caching achieves 2.86x speedup but causes severe degradation on 3/5 cases. Block-aware caching (recompute dynamic blocks, cache stable ones) **failed catastrophically** (SSIM 0.23-0.46), revealing that block-level caching in a sequential transformer is fundamentally flawed — cached intermediate states become inconsistent with evolving latent inputs.
+
+**Key findings for the combined strategy:**
+1. Temporal caching at the noise-prediction level works; block-level caching does not.
+2. Conservative temporal caching (steps 10-25) is a better quality-speed tradeoff than CFG-skip (1.66x / SSIM 0.93 vs 1.82x / SSIM 0.86).
+3. The same test cases degrade on both axes (tc3, tc5 — complex scenes, textures), suggesting these cases resist any form of acceleration.
+4. Degradation correlates with edit complexity, not input count.
+
+## 1. Mechanism Design
+
+### Uniform Temporal Caching (Schedules A, B)
+- **Mechanism**: For cached steps, skip both conditional and unconditional transformer passes entirely. Reuse the noise prediction (after CFG combination) from the most recent full step. Apply the scheduler step with the cached noise prediction and current timestep/latents.
+- **Rationale**: M4 showed step-to-step cos >0.999 in the plateau (steps 5-30). If consecutive noise predictions are nearly identical, reusing the previous one should produce similar latent evolution.
+- **Schedule A (aggressive)**: Cache steps 5-30 (26 cached, 14 full). 28 passes vs 80 baseline → theoretical 2.86x.
+- **Schedule B (conservative)**: Cache steps 10-25 (16 cached, 24 full). 48 passes vs 80 → theoretical 1.67x.
+
+### Block-Aware Caching (Schedule C) — FAILED
+- **Mechanism**: For cached steps, run the transformer but cache stable blocks (0-39) and only recompute dynamic blocks (40-59, including block 44 and all downstream). norm_out/proj_out always run on fresh block 59 output.
+- **Design rationale**: M4 showed block 44 is most dynamic (cos ~0.973) while blocks 0, 14, 59 are very stable (cos >0.999). By caching stable blocks and recomputing the dynamic zone, we expected to preserve quality while saving ~67% of block compute.
+- **Why it failed**: Cached blocks return stale hidden states from the last full step (step 4). Over 26 cached steps, these states become completely disconnected from the current latent state. Block 40 receives hidden states from step 4's latents rather than the current latents, creating a fundamental inconsistency. Unlike uniform caching (which reuses the final noise prediction and lets the scheduler handle latent evolution), block-level caching disrupts the internal transformer state machine.
+- **Lesson**: High step-to-step block output similarity does NOT imply safe block-level caching. The similarity holds because both the input and the block's computation are similar. When you fix the output (cache) but change the input (different latents), the downstream computation derails.
+
+## 2. Per-Schedule Results
+
+### Schedule A: Aggressive Uniform (cache steps 5-30)
+
+| Test Case | Images | Baseline (s) | Cached (s) | Speedup | SSIM | MSE | PSNR (dB) | VRAM (GB) |
+|-----------|--------|-------------|------------|---------|------|-----|-----------|-----------|
+| tc1_2img_objects | 2 | 46.97 | 16.43 | 2.859 | 0.8687 | 336.1 | 22.9 | 64.87 |
+| tc2_1img_landscape | 1 | 26.16 | 9.14 | 2.862 | 0.7576 | 530.2 | 20.9 | 64.87 |
+| tc3_2img_scene | 2 | 46.94 | 16.43 | 2.856 | 0.6845 | 996.6 | 18.1 | 64.87 |
+| tc4_3img_arrange | 3 | 72.00 | 25.19 | 2.858 | 0.9219 | 419.3 | 21.9 | 64.87 |
+| tc5_2img_texture | 2 | 47.36 | 16.56 | 2.861 | 0.6451 | 1260.6 | 17.1 | 64.87 |
+| **AGGREGATE** | | | | **2.859** | **0.7756** | **708.6** | **20.2** | |
+
+Speedup matches theoretical 80/28 = 2.857x perfectly. Quality is poor: 3/5 cases show severe degradation (SSIM <0.70). Reusing a 26-step-stale noise prediction is too aggressive.
+
+### Schedule B: Conservative Uniform (cache steps 10-25)
+
+| Test Case | Images | Baseline (s) | Cached (s) | Speedup | SSIM | MSE | PSNR (dB) | VRAM (GB) |
+|-----------|--------|-------------|------------|---------|------|-----|-----------|-----------|
+| tc1_2img_objects | 2 | 46.97 | 28.50 | 1.648 | 0.9552 | 80.7 | 29.1 | 64.87 |
+| tc2_1img_landscape | 1 | 26.16 | 15.68 | 1.669 | 0.9171 | 127.3 | 27.1 | 64.87 |
+| tc3_2img_scene | 2 | 46.94 | 28.17 | 1.666 | 0.9020 | 165.0 | 26.0 | 64.87 |
+| tc4_3img_arrange | 3 | 72.00 | 43.19 | 1.667 | 0.9739 | 44.3 | 31.7 | 64.87 |
+| tc5_2img_texture | 2 | 47.36 | 28.40 | 1.668 | 0.8929 | 143.1 | 26.6 | 64.87 |
+| **AGGREGATE** | | | | **1.664** | **0.9282** | **112.1** | **28.1** | |
+
+The best quality-speed tradeoff. 2/5 cases are "good" (SSIM >0.95), 2/5 "moderate" (0.90-0.95), 1/5 "notable" (0.89). Significantly better quality than aggressive uniform and M5 CFG-skip.
+
+### Schedule C: Block-Aware (cache blocks 0-39, recompute 40-59) — NEGATIVE RESULT
+
+| Test Case | Images | Baseline (s) | Cached (s) | Speedup | SSIM | MSE | PSNR (dB) | VRAM (GB) |
+|-----------|--------|-------------|------------|---------|------|-----|-----------|-----------|
+| tc1_2img_objects | 2 | 46.97 | 26.70 | 1.759 | 0.4097 | 2473.9 | 14.2 | 73.24 |
+| tc2_1img_landscape | 1 | 26.16 | 14.88 | 1.759 | 0.3555 | 4279.8 | 11.8 | 73.24 |
+| tc3_2img_scene | 2 | 46.94 | 26.68 | 1.760 | 0.2322 | 4043.9 | 12.1 | 73.24 |
+| tc4_3img_arrange | 3 | 72.00 | 40.93 | 1.759 | 0.4633 | 1873.4 | 15.4 | 76.07 |
+| tc5_2img_texture | 2 | 47.36 | 26.91 | 1.760 | 0.3847 | 3472.3 | 12.7 | 76.07 |
+| **AGGREGATE** | | | | **1.759** | **0.3691** | **3228.7** | **13.2** | |
+
+**Catastrophic failure.** SSIM 0.23-0.46 across all cases — worse than random perturbation of the baseline. Block-level caching destroys the transformer's internal state coherence. Additionally, VRAM increased by ~10 GB (73-76 GB vs 63-65 GB baseline) due to storing 40 blocks × 2 passes of cached hidden states — wasted memory for garbage output.
+
+## 3. Block-Aware vs Uniform: Direct Comparison
+
+| Metric | Aggressive Uniform | Conservative Uniform | Block-Aware |
+|--------|-------------------|---------------------|-------------|
+| **Speedup** | 2.86x | 1.66x | 1.76x |
+| **Mean SSIM** | 0.776 | 0.928 | 0.369 |
+| **SSIM range** | 0.645-0.922 | 0.893-0.974 | 0.232-0.463 |
+| **VRAM** | 64.87 GB | 64.87 GB | 73-76 GB |
+| **Verdict** | Too aggressive | Best tradeoff | Failed |
+
+Block-aware caching does NOT outperform uniform. It is dramatically worse at a similar speedup (1.76x vs 1.66x). The block-level redundancy identified in M4 (high cosine similarity between consecutive steps) does not translate into a viable block-level caching strategy. Uniform noise-prediction-level caching is the correct abstraction.
+
+## 4. Cross-Axis Comparison (M5 CFG-Skip vs M6 Temporal)
+
+| Test Case | Input Count | Edit Type | M5 CFG SSIM | M6 Cons. SSIM | M6 Aggr. SSIM | Overlap? |
+|-----------|------------|-----------|-------------|---------------|---------------|----------|
+| tc1_2img_objects | 2 | Object arrangement | 0.9352 | 0.9552 | 0.8687 | Both moderate; temporal better |
+| tc2_1img_landscape | 1 | Scene generation | 0.9008 | 0.9171 | 0.7576 | Both moderate; temporal better |
+| tc3_2img_scene | 2 | Complex scene | 0.8125 | 0.9020 | 0.6845 | **Both worst tier** — overlap |
+| tc4_3img_arrange | 3 | Multi-object | 0.9259 | 0.9739 | 0.9219 | Both good; temporal much better |
+| tc5_2img_texture | 2 | Texture/detail | 0.7315 | 0.8929 | 0.6451 | **Both worst tier** — overlap |
+
+### Key Observations
+
+1. **Failure modes overlap**: tc3 (complex scene) and tc5 (texture/detail) are the hardest cases on BOTH axes. These cases have fundamentally complex denoising dynamics that resist acceleration regardless of method.
+
+2. **Conservative temporal beats CFG-skip on every case**: At a slightly lower speedup (1.66x vs 1.82x), conservative temporal caching produces better quality on all 5 test cases. SSIM improvement: +0.02 to +0.16.
+
+3. **No input-count pattern**:
+   - 1-image (tc2): moderate on both
+   - 2-image (tc1, tc3, tc5): ranges from good to severe on both
+   - 3-image (tc4): good on both
+   Degradation is driven by **edit complexity** (texture, scene composition), not image count.
+
+4. **Edit type is the dominant factor**:
+   - Simple object placement (tc1, tc4): resilient to both acceleration methods
+   - Complex scenes / textures (tc3, tc5): degrade significantly under any acceleration
+   - This defines the boundary of what's achievable: complex/textured edits may need full compute
+
+5. **Combined strategy implication**: Since the hard cases overlap, combining CFG-skip + temporal caching on those cases would compound degradation. A selective strategy (accelerate easy cases, full compute for hard cases) would be more effective than a uniform combined policy.
+
+## 5. Why Aggressive Temporal Fails More Than CFG-Skip
+
+Both methods achieve similar speedups at their respective aggressive levels (2.86x temporal vs 1.82x CFG-skip), but temporal is more destructive:
+
+- **CFG-skip**: Removes the guidance signal but still computes a fresh noise prediction at every step. The denoising trajectory tracks the correct latent state, just without course-correction from CFG.
+- **Aggressive temporal**: Reuses a 26-step-stale noise prediction. The denoising trajectory diverges because the noise prediction doesn't adapt to the evolving latent state. The scheduler applies the SAME noise prediction to DIFFERENT latents across 26 steps, compounding error.
+
+This explains why conservative temporal (16 cached steps, max ~8-step staleness) works well — the staleness is bounded, limiting error accumulation.
+
+## 6. VRAM Impact
+
+| Configuration | VRAM (GB) | Delta vs Baseline |
+|--------------|-----------|-------------------|
+| Baseline | 63.20-64.87 | — |
+| Uniform temporal | 64.87 | +0-1.67 (noise pred tensor) |
+| Block-aware | 73.24-76.07 | +8.4-11.2 (40 blocks × 2 passes cache) |
+
+Uniform temporal caching has negligible VRAM overhead. Block-aware required ~10 GB extra for the block cache (wasted, given the quality collapse).
+
+---
+
+# Milestone 5: CFG-Skip Prototype + Robustness
+
+## Bottom-Line Summary
+
+**CFG-skip delivers a consistent 1.82x speedup (45% time reduction) but causes moderate-to-notable quality degradation.** The speedup is real and reliable, but the quality tradeoff is non-trivial: 3 of 5 test cases show moderate differences (SSIM 0.90–0.94), and 2 show notable degradation (SSIM 0.73–0.81). The degradation stems from disabling the CFG guidance signal, which compounds over 36 steps despite each step's cond/uncond similarity being >0.999. A conservative schedule (fewer skip steps) improves quality slightly but cannot eliminate the issue.
+
+**This narrows the method space**: CFG-skip alone is not a drop-in replacement for full CFG at scale=4.0. It is viable for quality-tolerant applications or as one component of a combined acceleration strategy (e.g., CFG-skip on fewer steps + temporal step-caching on the plateau region).
+
+## 1. Mechanism Design
+
+### CFG-Skip v1: Drop-CFG (Primary Method)
+- **Skip schedule**: Full CFG for steps 0–2 and 39; skip unconditional pass for steps 3–38 (36 of 40 steps)
+- **When skipping**: Use conditional transformer output directly as noise prediction — no unconditional pass, no CFG combination
+- **Rationale**: M4 showed cond/uncond cos >0.999 for steps 3–38. Eliminating the redundant unconditional pass saves one transformer forward pass per skipped step.
+- **Theoretical speedup**: 80 passes → 44 passes = 1.818x
+
+### CFG-Skip v2: Cached Uncond Reuse (Failed Variant)
+- **Same skip schedule**, but instead of dropping CFG, cache the most recent unconditional output and reuse it in the CFG formula for skip steps
+- **Result**: Catastrophic quality loss (SSIM 0.05–0.53). The cached uncond output is from a different latent state (previous step's input), so the cond/uncond relationship is destroyed.
+- **Conclusion**: Caching stale uncond outputs is not viable. The uncond output must correspond to the same input latents as the cond output.
+
+### Conservative v1 Schedule (Follow-Up)
+- **Skip schedule**: Full CFG for steps 0–4 and 35–39; skip uncond for steps 5–34 (30 steps)
+- **Theoretical speedup**: 80 passes → 50 passes = 1.60x
+- **Tested on 2 worst cases** from the aggressive schedule
+
+## 2. Per-Test-Case Results — v1 Aggressive (Skip 3–38)
+
+| Test Case | Images | Baseline (s) | Skip (s) | Speedup | SSIM | MSE | PSNR (dB) | VRAM_B (GB) | VRAM_S (GB) |
+|-----------|--------|-------------|----------|---------|------|-----|-----------|-------------|-------------|
+| tc1_2img_objects | 2 | 47.06 | 25.91 | 1.816 | 0.9352 | 281.7 | 23.6 | 63.20 | 63.20 |
+| tc2_1img_landscape | 1 | 26.19 | 14.40 | 1.818 | 0.9008 | 359.3 | 22.6 | 63.20 | 63.20 |
+| tc3_2img_scene | 2 | 47.07 | 25.88 | 1.819 | 0.8125 | 556.5 | 20.7 | 63.20 | 63.20 |
+| tc4_3img_arrange | 3 | 72.02 | 39.63 | 1.817 | 0.9259 | 393.0 | 22.2 | 63.23 | 63.23 |
+| tc5_2img_texture | 2 | 47.56 | 26.17 | 1.817 | 0.7315 | 1158.1 | 17.5 | 64.87 | 64.87 |
+| **AGGREGATE** | | | | **1.817** | **0.8612** | **549.7** | **21.3** | | |
+
+### Key Observations
+
+1. **Speedup is perfectly consistent**: 1.816–1.819x across all 5 cases regardless of image count (1, 2, or 3) or prompt complexity. Matches theoretical 80/44 = 1.818x exactly.
+
+2. **Quality varies by test case**:
+   - Good (SSIM >0.92): tc1 (objects), tc4 (3-image arrangement)
+   - Moderate (SSIM 0.90): tc2 (landscape)
+   - Notable degradation (SSIM <0.85): tc3 (scene), tc5 (texture)
+
+3. **Degradation pattern**: More complex/detailed prompts (scene composition, textures) degrade more than simple object placement prompts. This suggests CFG's guidance signal matters more for fine-grained generation than for coarse structure.
+
+4. **VRAM unchanged**: 63.20 GB for both variants. The unconditional pass doesn't allocate additional persistent memory beyond the model — it uses transient compute buffers that are already allocated.
+
+## 3. Conservative Schedule Comparison (tc3, tc5 only)
+
+| Test Case | Aggressive SSIM | Conservative SSIM | Delta | Aggressive Speed | Conservative Speed |
+|-----------|----------------|-------------------|-------|-----------------|-------------------|
+| tc3_2img_scene | 0.8125 | 0.8834 | +0.071 | 1.819x | 1.599x |
+| tc5_2img_texture | 0.7315 | 0.8213 | +0.090 | 1.817x | 1.600x |
+
+The conservative schedule improves SSIM by 0.07–0.09 at the cost of reducing speedup from 1.82x to 1.60x. Quality degradation is reduced but not eliminated.
+
+## 4. v2 Cached Uncond Results (Negative Result)
+
+| Test Case | v1 SSIM | v2 SSIM | v1→v2 Delta |
+|-----------|---------|---------|-------------|
+| tc1_2img_objects | 0.9352 | 0.0531 | -0.882 |
+| tc2_1img_landscape | 0.9008 | 0.2220 | -0.679 |
+| tc3_2img_scene | 0.8125 | 0.2365 | -0.576 |
+| tc4_3img_arrange | 0.9259 | 0.5275 | -0.398 |
+| tc5_2img_texture | 0.7315 | 0.2728 | -0.459 |
+
+**v2 is strictly worse than v1** on every test case by a large margin. Reusing stale unconditional outputs breaks the CFG computation because the cached uncond was computed from a different input latent. This amplifies error through the CFG scale factor (4.0×).
+
+## 5. Cross-Axis Analysis
+
+### Why High Redundancy ≠ Free Skipping
+
+The M4 redundancy data showed cond/uncond cosine similarity >0.999 for steps 3–38, with relative L2 distances of ~0.01–0.03. This suggested the unconditional pass was "redundant." However, the CFG formula amplifies this small difference:
+
+```
+combined = uncond + cfg_scale × (cond − uncond)
+```
+
+With cfg_scale=4.0, even a 1.5% relative difference between cond and uncond gets amplified to a ~4.5% perturbation per step. Over 36 skipped steps, this compounds:
+- Each step contributes ~4.5% perturbation relative to what full CFG would produce
+- The perturbations are correlated (same direction of change), so they accumulate
+- After 36 steps, the accumulated drift produces SSIM degradation of 0.06–0.27
+
+### Implications for Future Work
+
+1. **CFG-skip is best suited for lower cfg_scale values** where the amplification effect is smaller
+2. **Partial CFG-skip** (skip 10–20 steps in the peak-similarity region) may hit a better quality-speed sweet spot
+3. **Temporal step-caching** (M4 Axis 1) may be more promising because it doesn't disable a guidance signal — it caches the full combined prediction from a previous step
+4. **Combined approach**: Use full CFG for first ~5 and last ~5 steps, temporal caching for the plateau (steps 5–30), full steps for divergence (steps 31–39)
+
+## 6. Test Case Diversity
+
+| Test Case | Images | Aspect | Edit Type | Quality Impact |
+|-----------|--------|--------|-----------|----------------|
+| tc1_2img_objects | 2 | 1:1 | Object arrangement | Moderate |
+| tc2_1img_landscape | 1 | 3:2 | Scene generation | Moderate |
+| tc3_2img_scene | 2 | 1:1 | Complex scene | Notable |
+| tc4_3img_arrange | 3 | 1:1 | Multi-object | Moderate |
+| tc5_2img_texture | 2 | 4:3 | Texture/detail | Notable |
+
+Test cases with more compositional complexity or fine texture detail showed greater quality degradation from CFG-skip.
+
+---
+
 # Milestone 4: Redundancy Characterization
 
 ## Bottom-Line Summary

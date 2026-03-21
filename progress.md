@@ -1,5 +1,51 @@
 # Progress Log
 
+## 2026-03-21 — Milestone 6: Temporal Step-Caching Prototype (Block-Aware)
+
+### Completed
+- Obtained B200 node, verified GPU (NVIDIA B200, 183 GB), activated existing venv
+- Reviewed M4 block-level redundancy data to design cache policies
+- Implemented m6_temporal_cache.py with 3 schedules (aggressive uniform, conservative uniform, block-aware)
+- Ran warmup + 5 baseline + 15 cached-variant passes (5 test cases × 3 schedules)
+- Computed per-test-case metrics: wall-clock time, SSIM, MSE, PSNR
+- Saved all 20 output images + JSON results to `PROJECT_BLUE_ROOT/outputs/m6_temporal_cache/`
+- Produced cross-axis comparison table (M5 CFG-skip vs M6 temporal)
+- Updated findings.md with full analysis
+
+### Key Results
+- **Aggressive uniform (2.86x)**: Mean SSIM 0.78 — too aggressive, 3/5 cases severe degradation
+- **Conservative uniform (1.66x)**: Mean SSIM 0.93 — best tradeoff, beats M5 CFG-skip quality on all cases
+- **Block-aware (1.76x)**: Mean SSIM 0.37 — **catastrophic failure**. Block-level caching disconnects transformer state from evolving latents
+- **Cross-axis overlap**: Same hard cases (tc3/tc5 = complex scene/texture) degrade on both CFG and temporal axes
+- **No input-count pattern**: Degradation driven by edit complexity, not number of images
+- **Bottom line**: Conservative temporal caching (noise-prediction level) is the best single-axis method. Block-aware caching is not viable. Combined strategy should use selective acceleration based on edit complexity.
+
+---
+
+## 2026-03-21 — Milestone 5: CFG-Skip Prototype + Robustness
+
+### Completed
+- Obtained B200 node, verified GPU (NVIDIA B200, 183 GB), activated existing venv
+- Installed scikit-image for SSIM metric computation
+- Reviewed M4 redundancy data to design skip schedule: full CFG steps 0–2+39, skip 3–38
+- Implemented m5_cfg_skip.py (v1: drop-CFG) with 5 diverse test cases (1–3 images, varied prompts)
+- Ran warmup + 5 baseline + 5 skip-variant passes with identical seeds (SEED=42)
+- Implemented and tested m5_cfg_skip_v2.py (cached uncond reuse) — negative result, quality collapsed
+- Tested conservative schedule (skip 5–34) on 2 worst cases — marginal improvement
+- Computed per-test-case metrics: wall-clock time, SSIM, MSE, PSNR
+- Saved all 21 output images + 3 JSON result files to `PROJECT_BLUE_ROOT/outputs/m5_cfg_skip/`
+- Updated findings.md with full analysis, progress.md with log
+
+### Key Results
+- **Speedup**: 1.82x consistent across all 5 test cases (matches theoretical 80/44 = 1.818x)
+- **Quality**: SSIM 0.73–0.94 (mean 0.86). 3 cases moderate, 2 cases notable degradation
+- **VRAM**: Unchanged (63.20 GB) — skip saves compute, not memory
+- **v2 (cached uncond)**: Failed catastrophically (SSIM 0.05–0.53). Stale uncond + CFG amplification = disaster
+- **Conservative schedule**: SSIM +0.07–0.09 better, but speedup drops to 1.60x
+- **Bottom line**: CFG-skip delivers real speedup but quality tradeoff is non-trivial at cfg_scale=4.0. Best suited as part of a combined strategy, not standalone.
+
+---
+
 ## 2026-03-21 — Milestone 4: Redundancy Characterization
 
 ### Completed
