@@ -1,0 +1,62 @@
+# ── Upstream clone ────────────────────────────────────────
+Qwen-Image/
+
+# ── Model weights & large artifacts ──────────────────────
+weights/
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.onnx
+
+# ── Outputs & generated images ───────────────────────────
+outputs/
+
+# ── Logs & profiling data ────────────────────────────────
+logs/
+*.log
+*.prof
+*.lprof
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# ── Virtual environments ─────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Caches ───────────────────────────────────────────────
+.cache/
+*.cache
+.huggingface/
+
+# ── Planning / control-plane state ───────────────────────
+task_plan.md
+progress.md
+findings.md
+
+# ── Claude Code ──────────────────────────────────────────
+.claude/
+
+# ── OS / editor ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# ── Symlinks to blue drive ───────────────────────────────
+# (exclude any symlinks pointing outside the repo)
