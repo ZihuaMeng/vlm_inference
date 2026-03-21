@@ -167,3 +167,32 @@ Multi-image conditioning is pure sequence concatenation with no special cross-im
 3. [x] Run instrumented passes for 1, 2, 3 images
 4. [x] Analyze results: compute scaling, attention, cross-image redundancy, temporal/CFG interaction
 5. [x] Update findings.md and progress.md with full analysis
+
+## Milestone 8: Adaptive Combined Acceleration Prototype — COMPLETED
+
+Started 2026-03-21. Combined temporal caching + CFG-skip with adaptive quality-aware control.
+
+### Scientific Questions
+1. Does combining temporal caching + CFG-skip achieve higher speedup than either axis alone?
+2. Does an adaptive policy (modulating skip/cache decisions based on a runtime signal) improve quality robustness compared to fixed schedules?
+3. How does the combined speedup scale across 1, 2, and 3-image inputs?
+4. What is the quality/speedup Pareto frontier of the combined method?
+5. Can the adaptive policy preserve quality on the hard cases (complex/textured edits)?
+
+### Design
+- **Fixed combined**: M6 conservative temporal (cache steps 10-25) + M5 conservative CFG-skip (skip steps 5-9, 26-34). Total: 34/80 passes.
+- **Adaptive combined**: Per-step cosine similarity signal. Three tiers: temporal cache (cos>0.999, reuse prev), CFG-skip (cos>0.995, cond only), full compute (low similarity). Max consecutive cache: 4 steps.
+
+### Answers to Scientific Questions
+1. **Combined > single axis?** Yes. Fixed combined 2.35x > M5 1.82x and M6 conservative 1.66x individually. Adaptive 3.95x > M6 aggressive 2.86x.
+2. **Adaptive improve quality?** No. Adaptive is MORE aggressive and degrades quality MORE on hard cases (tc5 SSIM: fixed 0.832 vs adaptive 0.693). Fixed mode has lower SSIM variance (0.085 vs 0.093).
+3. **Image-count scaling?** Fixed: constant 2.35x regardless of image count. Adaptive: variable (3.19-4.98x). Absolute time saved scales with images (15s→27s→42s for 1→2→3 imgs).
+4. **Pareto frontier?** Two operating points: quality-first (fixed: 2.35x, 0.869 SSIM) and speed-first (adaptive: 3.95x, 0.809 SSIM).
+5. **Adaptive protect hard cases?** No. Cosine similarity in latent space does not correlate with perceptual quality for complex/textured content.
+
+### Tasks
+1. [x] Review M5/M6 results, M4 redundancy data, design combined schedules
+2. [x] Write m8_combined.py with fixed and adaptive modes
+3. [x] Run Phase 1: 7 test cases × 3 modes (21 runs)
+4. [x] Run Phase 2: 3 scaling cases × 3 image counts × 3 modes (27 runs)
+5. [x] Analyze results, update findings.md and progress.md

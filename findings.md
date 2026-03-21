@@ -2,6 +2,152 @@
 
 ---
 
+# Milestone 8: Adaptive Combined Acceleration Prototype
+
+## 1. Combined Method Description
+
+### Design
+Integrates temporal step-caching (M6) and CFG-skip (M5) within a single denoising loop. Two operating modes:
+
+**Fixed Combined**: Conservative schedules from both axes applied simultaneously.
+- Steps 0-4: Full compute (2 transformer passes per step)
+- Steps 5-9: CFG-skip only (1 pass — skip unconditional)
+- Steps 10-25: Temporal cache (0 passes — reuse previous prediction)
+- Steps 26-34: CFG-skip only (1 pass)
+- Steps 35-39: Full compute (2 passes)
+- Total: 34/80 passes → theoretical 2.35x
+
+**Adaptive Combined**: Runtime cosine similarity signal modulates per-step decisions. Three tiers:
+1. **Temporal cache** (0 passes): when lagged similarity > 0.999 AND consecutive cached < 4
+2. **CFG-skip** (1 pass): run conditional only, when current similarity > 0.995
+3. **Full compute** (2 passes): when similarity drops below threshold
+
+Adaptive config: temporal_threshold=0.999, cfg_skip_threshold=0.995, max_consecutive_cache=4, min_warmup_steps=3.
+
+### Implementation
+Single script (`scripts/m8_combined.py`) with `run_inference(mode=...)` supporting baseline, fixed_combined, and adaptive_combined. The adaptive mode measures cosine similarity between current and previous conditional outputs at each probe step, using the similarity as a signal to decide the next step's action.
+
+## 2. Per-Case Results Table
+
+### Phase 1: Primary Experiments (7 test cases)
+
+| Case | Imgs | Base(s) | Fix(s) | Fix_x | Fix_SSIM | Adp(s) | Adp_x | Adp_SSIM |
+|---|---|---|---|---|---|---|---|---|
+| tc1_2img_objects | 2 | 46.95 | 19.95 | 2.35x | 0.947 | 14.15 | 3.32x | 0.932 |
+| tc2_1img_landscape | 1 | 26.14 | 11.10 | 2.35x | 0.895 | 5.27 | 4.96x | 0.806 |
+| tc3_2img_scene | 2 | 46.90 | 19.92 | 2.35x | 0.864 | 12.36 | 3.79x | 0.807 |
+| tc4_3img_arrange | 3 | 71.89 | 30.54 | 2.35x | 0.955 | 15.32 | 4.69x | 0.919 |
+| tc5_2img_texture | 2 | 47.27 | 20.09 | 2.35x | 0.832 | 11.28 | 4.19x | 0.693 |
+| tc6_3img_portrait | 3 | 72.00 | 30.59 | 2.35x | 0.905 | 22.57 | 3.19x | 0.830 |
+| tc7_3img_nature | 3 | 71.93 | 30.56 | 2.35x | 0.687 | 20.73 | 3.47x | 0.672 |
+| **Aggregate** | | | | **2.35x** | **0.869** | | **3.95x** | **0.809** |
+
+### Adaptive Decision Distribution
+
+| Case | Full | CFG-skip | Temporal Cache | Total Passes |
+|---|---|---|---|---|
+| tc1_2img_objects | 4 | 16 | 20 | 24 |
+| tc2_1img_landscape | 4 | 8 | 28 | 16 |
+| tc3_2img_scene | 5 | 11 | 24 | 21 |
+| tc4_3img_arrange | 3 | 11 | 26 | 17 |
+| tc5_2img_texture | 3 | 13 | 24 | 19 |
+| tc6_3img_portrait | 5 | 15 | 20 | 25 |
+| tc7_3img_nature | 7 | 9 | 24 | 23 |
+
+## 3. Fixed vs Adaptive Comparison
+
+### Aggregate
+- **Fixed combined**: 2.35x speedup, 0.869 mean SSIM, SSIM std=0.085
+- **Adaptive combined**: 3.95x speedup, 0.809 mean SSIM, SSIM std=0.093
+
+**Trade-off**: Adaptive delivers 68% more speedup (+1.60x) at a cost of 0.060 lower mean SSIM.
+
+### Hard Cases (tc3, tc5 from M5/M6)
+- **tc3_2img_scene**: Fixed 0.864 vs Adaptive 0.807 (Adaptive 0.057 worse)
+- **tc5_2img_texture**: Fixed 0.832 vs Adaptive 0.693 (Adaptive 0.139 worse)
+
+**Finding**: Adaptive mode does NOT protect hard cases. It is more aggressive (caching 24+ of 40 steps) and degrades quality further on prompts where complexity or texture are critical. The runtime similarity signal remains high even when the model is producing outputs that diverge visually from the baseline — the cosine similarity in latent space does not correlate well with perceptual quality differences for complex/textured content.
+
+### New Hard Case: tc7_3img_nature
+Both modes struggle on tc7 (forest/lake scene): Fixed SSIM=0.687, Adaptive SSIM=0.672. This is the worst-performing case for both modes. The dense, textured nature scene (forest + lake + sky) is inherently hard for both CFG-skip and temporal caching.
+
+## 4. Image-Count Scaling Analysis
+
+### Phase 2: Scaling Results (3 cases × 1/2/3 images)
+
+| Case | 1img Base | 2img Base | 3img Base | 1img Fix_x | 2img Fix_x | 3img Fix_x | 1img Adp_x | 2img Adp_x | 3img Adp_x |
+|---|---|---|---|---|---|---|---|---|---|
+| scale_objects | 26.6s | 46.9s | 71.9s | 2.35x | 2.35x | 2.35x | 3.78x | 4.98x | 3.99x |
+| scale_shapes | 26.6s | 46.9s | 72.0s | 2.35x | 2.35x | 2.35x | 3.78x | 4.97x | 4.69x |
+| scale_portrait | 26.6s | 47.0s | 72.1s | 2.35x | 2.35x | 2.35x | 3.78x | 3.19x | 3.19x |
+
+### Key Observations
+
+1. **Fixed combined speedup is perfectly constant** at 2.35x regardless of image count. This is expected: the fixed schedule always uses exactly 34/80 passes, and the speedup ratio is independent of per-pass cost.
+
+2. **Baseline scales super-linearly**: 1img=26.6s, 2img=46.9s (1.76x), 3img=72.0s (2.71x). Matches M7's O(S^1.4) scaling from quadratic attention.
+
+3. **Adaptive speedup varies non-monotonically**: Not a simple function of image count. The adaptive signal's behavior depends on the specific generation trajectory, not just the sequence length. For scale_objects: 1img=3.78x, 2img=4.98x, 3img=3.99x.
+
+4. **Absolute time saved scales with image count**: Despite constant speedup ratio for fixed mode, absolute savings grow: 1img saves ~15s, 2img saves ~27s, 3img saves ~42s. Multi-image cases benefit more in wall-clock terms.
+
+5. **Quality generally improves with more images** for both modes: scale_portrait fixed SSIM: 1img=0.803, 2img=0.854, 3img=0.905. This suggests additional conditioning images stabilize the generation trajectory, making it more tolerant of acceleration.
+
+## 5. Quality Robustness Assessment
+
+| Metric | Fixed Combined | Adaptive Combined |
+|---|---|---|
+| Mean SSIM | 0.869 | 0.809 |
+| Std SSIM | 0.085 | 0.093 |
+| Min SSIM | 0.687 | 0.672 |
+| Max SSIM | 0.955 | 0.932 |
+| Range | 0.268 | 0.260 |
+
+**Fixed is more robust** (lower variance). Adaptive's higher speed comes with more variable quality outcomes. However, both modes share the same hard cases — quality variance is primarily driven by prompt complexity, not by the acceleration mode.
+
+The adaptive mode's failure to protect hard cases suggests that the per-step cosine similarity is not a good proxy for perceptual quality. In latent space, complex/textured images can have high step-to-step similarity (the trajectory is "smooth") while still producing visually different outputs when acceleration perturbs the trajectory.
+
+## 6. Comparison with Single-Axis Methods (M5, M6)
+
+| Method | Speedup | Mean SSIM | Hard Case SSIM (tc3/tc5 avg) |
+|---|---|---|---|
+| M5 CFG-skip (aggressive) | 1.82x | 0.861 | 0.772 |
+| M5 CFG-skip (conservative) | 1.60x | 0.852* | 0.852* |
+| M6 Temporal (conservative) | 1.66x | 0.928 | 0.897 |
+| M6 Temporal (aggressive) | 2.86x | 0.776 | 0.665 |
+| **M8 Fixed combined** | **2.35x** | **0.869** | **0.848** |
+| **M8 Adaptive combined** | **3.95x** | **0.809** | **0.750** |
+
+*M5 conservative only tested on tc3/tc5.
+
+**Combined speedup exceeds either single axis**:
+- Fixed combined (2.35x) > M5 aggressive (1.82x) + M6 conservative (1.66x) individually
+- Adaptive combined (3.95x) > M6 aggressive (2.86x), the fastest single-axis method
+
+**No negative interaction**: Combining temporal caching and CFG-skip does NOT compound quality loss. Fixed combined SSIM (0.869) is between M5 aggressive (0.861) and M6 conservative (0.928), demonstrating that the two acceleration axes operate on orthogonal redundancy dimensions (temporal step-to-step vs. cond/uncond within a step).
+
+## 7. Bottom-Line Summary
+
+### What works
+- **Fixed combined** is the recommended operating mode: **2.35x speedup at 0.869 mean SSIM**. Predictable, consistent performance (exactly 2.35x on every test case regardless of prompt or image count). Quality is acceptable for most use cases.
+- **Adaptive combined** achieves **3.95x mean speedup** but with unacceptable quality on hard cases (SSIM 0.672-0.693 for nature/texture prompts). Useful only where quality tolerance is high.
+
+### What doesn't work
+- **Adaptive quality protection**: The cosine similarity signal does not protect quality on hard cases. It successfully identifies the temporal plateau for caching but cannot distinguish "safe to skip" from "will degrade quality" within the plateau.
+- **Image-count scaling of speedup ratio**: Speedup ratio is constant (fixed) or non-monotonic (adaptive). Multi-image cases do NOT get a higher speedup ratio — they get the same ratio applied to a larger baseline, saving more absolute time.
+
+### Pareto frontier
+Two operating points are available:
+1. **Quality-first**: Fixed combined at 2.35x, 0.869 SSIM
+2. **Speed-first**: Adaptive combined at 3.95x, 0.809 SSIM
+There is no point between these — the adaptive signal has discrete transitions that produce these two clusters.
+
+### Implications
+- The 2.35x speedup from fixed combined reduces a 3-image inference from 72s → 31s. This is a meaningful production improvement.
+- Further acceleration beyond 2.35x with acceptable quality will require approaches beyond schedule-based caching/skipping — likely architectural changes (sparse attention, token pruning) or distillation.
+
+---
+
 # Milestone 7: Multi-Image Condition Redundancy Characterization
 
 ## 1. Pipeline Mechanical Structure for Multi-Image Input

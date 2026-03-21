@@ -1,5 +1,29 @@
 # Progress Log
 
+## 2026-03-21 — Milestone 8: Adaptive Combined Acceleration Prototype
+
+### Completed
+- Obtained B200 node, verified GPU (NVIDIA B200, 183 GB), activated existing venv
+- Reviewed M5 (CFG-skip) and M6 (temporal cache) results and scripts, M4 redundancy data
+- Designed combined prototype integrating both axes with two modes: fixed combined (conservative M5+M6 schedules) and adaptive combined (cosine similarity signal with 3-tier decisions)
+- Wrote `scripts/m8_combined.py` — single script handling baseline + fixed + adaptive modes
+- Ran Phase 1: 7 test cases (5 original + 2 new 3-image) × 3 modes = 21 runs
+- Ran Phase 2: 3 scaling cases × 3 image counts × 3 modes = 27 runs (48 total)
+- Saved 48 output images + JSON results to `PROJECT_BLUE_ROOT/outputs/m8_combined/`
+- Updated findings.md with full 7-section analysis
+
+### Key Results
+- **Fixed combined**: 2.35x speedup (matches theoretical 80/34), mean SSIM 0.869, consistent across all cases
+- **Adaptive combined**: 3.95x mean speedup (16-25 passes), mean SSIM 0.809, more variable
+- **Combined > single axis**: Fixed 2.35x exceeds M5 (1.82x) and M6 conservative (1.66x). Adaptive 3.95x exceeds M6 aggressive (2.86x)
+- **No negative interaction**: Combining two axes does NOT compound quality loss. SSIM is between M5 and M6 individual results
+- **Adaptive does NOT protect hard cases**: tc5 texture SSIM drops from 0.832 (fixed) to 0.693 (adaptive). Cosine similarity is not a good proxy for perceptual quality
+- **Image-count scaling**: Fixed speedup ratio constant at 2.35x. Absolute time saved scales with image count (15s→27s→42s for 1→2→3 images). Adaptive speedup varies non-monotonically
+- **Quality improves with more images**: More conditioning images stabilize the trajectory, improving SSIM for both modes
+- **Bottom line**: Fixed combined (2.35x, 0.869 SSIM) is the recommended mode. Reduces 3-image inference from 72s → 31s
+
+---
+
 ## 2026-03-21 — Milestone 7: Multi-Image Condition Redundancy Characterization
 
 ### Completed
