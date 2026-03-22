@@ -196,3 +196,32 @@ Started 2026-03-21. Combined temporal caching + CFG-skip with adaptive quality-a
 3. [x] Run Phase 1: 7 test cases × 3 modes (21 runs)
 4. [x] Run Phase 2: 3 scaling cases × 3 image counts × 3 modes (27 runs)
 5. [x] Analyze results, update findings.md and progress.md
+
+## Milestone 9: Broad Validation + Ablation Study — COMPLETED
+
+Started 2026-03-21. Validate fixed combined strategy on diverse 18-case test suite. Produce ablation study and failure characterization.
+
+### Answers to Scientific Questions
+1. **Does 2.35x hold?** Yes. 2.353x ± 0.001 across all 18 cases. Perfectly consistent — independent of content, difficulty, or image count.
+2. **Does SSIM ~0.87 hold?** No. Mean SSIM drops to 0.836 (from 0.869) with more diverse inputs. The original 7 cases under-represented hard content types.
+3. **Quality distribution?** SSIM > 0.90: 39% (7/18). SSIM > 0.85: 61% (11/18). SSIM < 0.80: 33% (6/18). Bimodal: robust cluster (0.83–0.96) and fragile cluster (0.64–0.80).
+4. **Component contribution?** Temporal caching is the better single axis (1.667x, 0.885 SSIM vs CFG-skip 1.600x, 0.851). Combining does NOT compound quality loss — overlapping vulnerability means actual combined SSIM (0.836) far exceeds independent prediction (0.753).
+5. **Absolute time scaling?** Savings proportional to image count: 15s (1-img), 27s (2-img), 42s (3-img). 2-image has best quality (0.896 SSIM), likely due to difficulty confound.
+6. **What makes a case hard?** Fine-grained visual detail: complex scenes (0.637), style transfer (0.642), material texture (0.665), nature scenes (0.687). Structural/semantic content is robust (objects: 0.947, portraits: 0.911, arrangements: 0.955). Difficulty rating is the strongest predictor: easy=0.943, medium=0.886, hard=0.753.
+
+### Design
+- **18 test cases**: 6×1-image, 6×2-image, 6×3-image. Covers: simple objects, landscape, style transfer, text/logo, material/texture, portrait, object placement, scene composition, texture detail, identity-preserving, object replacement, background change, arrangement, multi-portrait, nature scene, interior design, complex scene, abstract. Includes original 5 M5/M6 cases + 2 M8 cases + 11 new cases.
+- **4 configurations per case**:
+  a. Baseline: full 40-step, full CFG (80 passes)
+  b. CFG-skip only: M5 conservative (skip uncond steps 5-34, 50 passes, 1.60x theoretical)
+  c. Temporal cache only: M6 conservative (cache steps 10-25, 48 passes, 1.67x theoretical)
+  d. Fixed combined: M8 (temporal 10-25 + CFG-skip 5-9,26-34, 34 passes, 2.35x theoretical)
+- **Metrics**: Wall-clock time, speedup, SSIM, LPIPS (perceptual distance)
+- **Identical seeds** (SEED=42) for all paired comparisons
+
+### Tasks
+1. [x] Bootstrap environment: B200 GPU, venv, install LPIPS
+2. [x] Write m9_validation.py evaluation script
+3. [x] Run 18 cases × 4 configs = 72 inference runs (~40 min on B200)
+4. [x] Analyze results: ablation, quality distribution, scaling, failure characterization
+5. [x] Update findings.md and progress.md with full analysis

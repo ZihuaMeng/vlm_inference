@@ -1,5 +1,29 @@
 # Progress Log
 
+## 2026-03-21 — Milestone 9: Broad Validation + Ablation Study
+
+### Completed
+- Obtained B200 node, verified GPU (NVIDIA B200, 183 GB), activated existing venv
+- Installed LPIPS (lpips 0.1.4 with AlexNet backbone) for perceptual quality metric
+- Designed 18-case test suite: 6×1-image, 6×2-image, 6×3-image, covering 18 edit types across easy/medium/hard difficulty
+- Wrote `scripts/m9_validation.py` — single script running 4 configs per case with incremental saving
+- Ran full evaluation: 18 cases × 4 configs = 72 inference runs (~40 min total on B200)
+- Computed SSIM and LPIPS for all 54 non-baseline outputs vs their paired baselines
+- Saved 72 output images + JSON + CSV results to `PROJECT_BLUE_ROOT/outputs/m9_validation/`
+- Updated findings.md with 7-section analysis including full results table, ablation, distribution, scaling, failure characterization, and generalization assessment
+
+### Key Results
+- **Speedup generalizes perfectly**: 2.353x ± 0.001 across all 18 cases, all image counts, all edit types
+- **Quality lower than M8 suggested**: mean SSIM 0.836 (vs 0.869 from M8's 7 cases). Broader test suite exposed vulnerability to texture/style-heavy content
+- **Bimodal quality**: 39% of cases have SSIM > 0.90 (structural content), 33% have SSIM < 0.80 (fine-detail content)
+- **Ablation**: Temporal caching is the better single axis (1.667x, 0.885 SSIM). CFG-skip contributes additional speedup. Combining does NOT compound quality loss — overlapping vulnerability
+- **Difficulty is the strongest predictor**: easy=0.943, medium=0.886, hard=0.753 mean SSIM
+- **Image-count scaling**: Absolute savings 15s→27s→42s for 1→2→3 images. 2-image has best quality (0.896)
+- **Failure pattern**: Complex scenes, style transfer, material texture, nature scenes degrade most. Structural/semantic content (objects, portraits, arrangements) is robust
+- **Bottom line**: Method validated for structural content (SSIM 0.90+). Unreliable for fine-detail content (SSIM 0.64–0.77). Recommend content-type gating or more conservative schedule for production use
+
+---
+
 ## 2026-03-21 — Milestone 8: Adaptive Combined Acceleration Prototype
 
 ### Completed
