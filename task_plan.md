@@ -1,5 +1,27 @@
 # Task Plan
 
+## FLUX Track — F1: Baseline, Profiling, and Temporal Transfer Test — COMPLETED
+
+Completed 2026-03-28. See findings.md "FLUX Track — F1" section for full results.
+
+### Answers to Scientific Questions
+1. **Baseline performance?** 9.17s wall-clock (28 steps, single pass). 5.2x faster than Qwen baseline. Peak VRAM 37.52 GB.
+2. **Multi-image support?** No. Pipeline rejects multi-image input. Single reference image only.
+3. **Profiling structure?** Denoising loop = 97.8%. Steps perfectly uniform (321.3ms ± 0.2ms). Attention = 73-75% of block time. Dual/single block cost ratio = 1.08x (not 2.4x as predicted).
+4. **Temporal plateau?** CONFIRMED. Steps 4-23 (74% of trajectory). Same three-phase pattern as Qwen. Milder divergence (cos=0.981 vs Qwen's 0.816).
+5. **Does temporal caching transfer?** YES. Conservative: 2.15x speedup, 0.883 SSIM. Aggressive: 3.50x, 0.800 SSIM. Same content-dependent quality pattern.
+6. **Transfer verdict?** Temporal plateau is a property of rectified flow matching, not model-specific. Caching transfers directly.
+
+### Tasks
+1. [x] Bootstrap: install sentencepiece, download FLUX Kontext-dev weights (54 GB), verify B200
+2. [x] Phase 1: Baseline timing (9.17s, 37.52 GB VRAM, multi-image test → fails)
+3. [x] Phase 2: Three-level profiling (pipeline stages, per-step dynamics, module-level breakdown)
+4. [x] Phase 3: Temporal redundancy characterization (plateau steps 4-23, 74% of trajectory)
+5. [x] Phase 4: Temporal caching prototype (conservative 2.15x/0.883, aggressive 3.50x/0.800)
+6. [x] Update findings.md, progress.md, task_plan.md with full results
+
+---
+
 ## FLUX Track — F0: Kontext-dev Reconnaissance — COMPLETED
 
 Completed 2026-03-28. See findings.md "FLUX Track — F0" section for full results.

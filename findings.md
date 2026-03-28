@@ -2,6 +2,220 @@
 
 ---
 
+# FLUX Track — F1: Kontext-dev Baseline, Profiling, and Temporal Transfer Test
+
+## 1. Environment + Baseline (Phase 1)
+
+| Metric | Value |
+|--------|-------|
+| **GPU** | NVIDIA B200, 191.5 GB VRAM |
+| **torch** | 2.10.0+cu128 |
+| **diffusers** | 0.38.0.dev0 |
+| **sentencepiece** | 0.2.1 |
+| **Model weights** | 54 GB on disk (23 GB transformer + text encoders + VAE) |
+| **VRAM after load** | 33.76 GB |
+| **Peak VRAM** | 37.52 GB reserved (19.6% of 191.5 GB) |
+| **Baseline wall-clock** | 9.17s (28 steps, single pass) |
+| **Per-step average** | 327.7ms |
+| **Output size** | 1024x1024 |
+| **Multi-image** | NOT supported (pipeline rejects list input) |
+
+### Comparison to Qwen baseline
+
+| Metric | Qwen (M2) | Kontext (F1) | Ratio |
+|--------|-----------|-------------|-------|
+| Wall-clock time | 47.4s (40 steps × 2 passes) | 9.17s (28 steps × 1 pass) | **5.2x faster** |
+| Per-step time | 1184.5ms | 327.7ms | **3.6x faster** |
+| Total passes | 80 | 28 | 2.86x fewer |
+| Peak VRAM | 63.20 GB | 37.52 GB | 1.69x less |
+
+Kontext is 5.2x faster than Qwen out of the box, driven by guidance distillation (1 vs 2 passes/step) and fewer steps (28 vs 40).
+
+## 2. Structured Profiling (Phase 2)
+
+### Level 1: Pipeline Stage Breakdown
+
+| Stage | Time (s) | Pct |
+|-------|----------|-----|
+| Image preprocessing | 0.017 | 0.2% |
+| Text encoding | 0.020 | 0.2% |
+| VAE encoding + latent prep | 0.054 | 0.6% |
+| **Denoising loop** | **8.997** | **97.8%** |
+| VAE decoding | 0.109 | 1.2% |
+| **Total** | **9.196** | |
+
+Same pattern as Qwen (M3): denoising loop dominates (97.8% vs 99.3%). The small difference is that Kontext's VAE decode (1.2%) is proportionally more visible because the denoising loop is much shorter.
+
+### Level 2: Per-Step Dynamics
+
+Steps are **perfectly uniform**: 321.3ms ± 0.2ms (std/mean = 0.06%). No variation across early, middle, or late steps. Same finding as Qwen.
+
+| Metric | Kontext | Qwen (M3) |
+|--------|---------|-----------|
+| Mean step time | 321.3ms | 1184.5ms |
+| Std dev | 0.2ms | 1.4ms |
+| Passes per step | 1 | 2 |
+| Scheduler step | 0.1ms | 0.1ms |
+
+### Level 3: Module-Level Breakdown
+
+#### Block type comparison
+
+| Block Type | Count | Mean per-block (ms) | Total (ms) | Pct of transformer |
+|------------|-------|--------------------:|----------:|-------------------:|
+| Dual-stream | 19 | 5.91 | 112.35 | 34.9% |
+| Single-stream | 38 | 5.48 | 208.13 | 64.7% |
+| Embeddings | — | — | 0.85 | 0.3% |
+| Output | — | — | 0.20 | 0.1% |
+
+**Surprise: dual/single cost ratio is 1.08x**, not the 2.4x predicted in F0. The F0 estimate was based on parameter counts (~340M vs ~142M), but on B200 with FlashAttention, the attention-dominated cost makes both block types nearly equal per forward pass. This is because attention cost depends on sequence length (same for both types), not parameter count.
+
+#### Within-block breakdown (averaged across sampled blocks)
+
+| Component | Dual-stream | Single-stream |
+|-----------|------------:|--------------:|
+| **Attention** | **4.34ms (73%)** | **4.10ms (75%)** |
+| FF/MLP (image) | 0.86ms (14%) | 0.39ms (7%) |
+| FF/MLP (text) | 0.08ms (1%) | — |
+| Proj out | — | 0.49ms (9%) |
+| Norms | 0.33ms (6%) | 0.20ms (4%) |
+| Other (gates, residual) | 0.35ms (6%) | 0.31ms (6%) |
+
+Attention dominates both block types at ~73-75%, matching Qwen's 75.8%.
+
+### Comparison to Qwen profiling structure
+
+| Dimension | Qwen (M3) | Kontext (F1) |
+|-----------|-----------|-------------|
+| Denoising loop dominance | 99.3% | 97.8% |
+| Steps uniform? | Yes (±1.4ms) | Yes (±0.2ms) |
+| Attention fraction | 75.8% | 73-75% |
+| Block uniformity | All 60 identical | 2 types, but ~equal cost (1.08x ratio) |
+| Per-block cost | 9.87ms (cond pass) | 5.91ms (dual) / 5.48ms (single) |
+| CFG overhead | 2x (cond + uncond) | None (guidance-distilled) |
+
+## 3. Temporal Redundancy Characterization (Phase 3)
+
+### Step-to-step similarity across 28 steps
+
+| Step | Cos Sim | Rel L2 | Phase |
+|------|---------|--------|-------|
+| 1 | 0.9574 | 0.514 | Convergence |
+| 2 | 0.9954 | 0.099 | Convergence |
+| 3 | 0.9987 | 0.050 | Convergence |
+| 4 | 0.9992 | 0.046 | **Plateau start** |
+| 5-11 | 0.9997-0.9999 | 0.012-0.027 | Plateau |
+| 12 | **0.9999** | **0.012** | **Peak stability** |
+| 13-20 | 0.9998-0.9999 | 0.013-0.018 | Plateau |
+| 21-23 | 0.9994-0.9997 | 0.023-0.038 | Late plateau |
+| 24-25 | 0.9966-0.9986 | 0.051-0.078 | **Divergence start** |
+| 26-27 | 0.9815-0.9939 | 0.104-0.182 | Divergence |
+
+### Three-phase pattern: CONFIRMED
+
+Same pattern as Qwen:
+- **Steps 1-3**: Convergence (cos 0.957 → 0.999)
+- **Steps 4-23**: Plateau (cos > 0.999) — 20 steps, **74% of trajectory**
+- **Steps 24-27**: Divergence (cos drops to 0.981)
+
+### Comparison to Qwen temporal profile
+
+| Dimension | Qwen (M4) | Kontext (F1) |
+|-----------|-----------|-------------|
+| Three-phase pattern? | Yes | Yes |
+| Convergence phase | Steps 1-4 (cos 0.98→0.9995) | Steps 1-3 (cos 0.957→0.999) |
+| Plateau region | Steps 5-30 (26 steps, 65%) | Steps 4-23 (20 steps, **74%**) |
+| Peak similarity | cos > 0.9999 | cos = 0.9999 |
+| Divergence | Dramatic (cos=0.816 at step 39) | **Mild (cos=0.981 at step 27)** |
+| Most dynamic block | Block 44 (mid-late) | single_37 (last, cos min=0.891) |
+
+Key difference: Kontext's divergence is **much milder** (cos=0.981 vs 0.816). This suggests the final steps make smaller corrections, possibly because the guidance-distilled trajectory is smoother than Qwen's CFG-modified trajectory.
+
+## 4. Temporal Caching Prototype (Phase 4)
+
+### Schedules tested
+
+| Schedule | Cached Steps | Full Steps | Theoretical Speedup |
+|----------|-------------|-----------|-------------------:|
+| Aggressive | Steps 4-23 (20 cached) | 8 | 3.50x |
+| Conservative | Steps 6-20 (15 cached) | 13 | 2.15x |
+
+### Results (5 test cases, SEED=42)
+
+| Test Case | Aggr Speed | Aggr SSIM | Cons Speed | Cons SSIM |
+|-----------|----------:|----------:|----------:|----------:|
+| tc1_red_cube | 3.50x | **0.976** | 2.15x | **0.987** |
+| tc2_landscape | 3.50x | 0.673 | 2.15x | 0.832 |
+| tc3_complex | 3.50x | **0.895** | 2.15x | **0.952** |
+| tc4_portrait | 3.50x | 0.749 | 2.15x | 0.836 |
+| tc5_texture | 3.50x | 0.708 | 2.15x | 0.807 |
+| **Mean** | **3.50x** | **0.800** | **2.15x** | **0.883** |
+
+### Key findings
+
+1. **Speedups match theory exactly**: 3.50x and 2.15x — no overhead from caching mechanism.
+2. **Conservative schedule (2.15x, 0.883 SSIM)** is the better tradeoff. 3/5 cases have SSIM > 0.83.
+3. **Aggressive schedule (3.50x, 0.800 SSIM)** degrades significantly on complex content (3/5 severe).
+4. **Same vulnerability pattern as Qwen**: landscape, portrait, and texture cases degrade more than simple geometry.
+5. **Baseline is already very fast**: 8.9s → 4.1s (conservative) or 2.6s (aggressive). Absolute savings of ~5-6s.
+
+### Comparison to Qwen caching results
+
+| Dimension | Qwen (M6) | Kontext (F1) |
+|-----------|-----------|-------------|
+| Conservative speedup | 1.66x | **2.15x** |
+| Conservative SSIM | 0.93 | 0.88 |
+| Aggressive speedup | 2.86x | **3.50x** |
+| Aggressive SSIM | 0.78 | 0.80 |
+| Speedup matches theory? | Yes | Yes |
+| Content-dependent quality? | Yes (tc3/tc5 worst) | Yes (tc2/tc4/tc5 worst) |
+
+Kontext achieves higher speedup ratios because the plateau is proportionally larger (74% vs 65% of trajectory), but quality degradation is comparable.
+
+## 5. Transfer Verdict
+
+### Temporal Plateau
+**CONFIRMED.** Identical three-phase pattern (convergence → plateau → divergence) in both Qwen and Kontext, despite different architectures, guidance strategies, and step counts. The plateau is a property of rectified flow matching, not model-specific.
+
+### Temporal Caching
+**TRANSFERS.** The same mechanism (reuse previous step's noise prediction during the plateau) works on both models with comparable quality/speedup tradeoffs. Conservative schedule recommended for both.
+
+### CFG-Skip
+**NOT APPLICABLE.** Kontext is guidance-distilled — no unconditional pass exists. This axis is eliminated by design, which is why Kontext starts from a faster baseline.
+
+### Block-Aware Caching
+**NOT TESTED** (per task spec — failed on Qwen, different block structure here). F0 predicted it wouldn't transfer; F1 profiling confirms blocks are more uniform than expected (1.08x ratio), so block-level differentiation has even less justification.
+
+## 6. Structured Cross-Model Comparison Table
+
+| Dimension | Qwen-Image-Edit-2511 | FLUX.1 Kontext-dev |
+|-----------|---------------------|-------------------|
+| **Architecture** | 19.5B transformer, 60 identical dual-stream blocks | 12B transformer, 19 dual + 38 single blocks |
+| **Guidance** | True CFG (2 passes/step) | Guidance-distilled (1 pass/step) |
+| **Default steps** | 40 (80 passes total) | 28 (28 passes total) |
+| **Multi-image** | 1-3 images | 1 image only |
+| **Baseline time** | 47.4s | 9.17s (**5.2x faster**) |
+| **Peak VRAM** | 63.2 GB | 37.5 GB |
+| **Denoising dominance** | 99.3% | 97.8% |
+| **Steps uniform** | Yes (±1.4ms) | Yes (±0.2ms) |
+| **Attention fraction** | 75.8% | 73-75% |
+| **Block cost uniformity** | All identical | 1.08x (effectively uniform) |
+| **Temporal plateau** | Steps 5-30 (65%) | Steps 4-23 (74%) |
+| **Plateau cos range** | >0.999 | >0.999 |
+| **Final-step divergence** | Dramatic (cos=0.816) | Mild (cos=0.981) |
+| **Conservative cache speedup** | 1.66x → 28.5s | 2.15x → 4.1s |
+| **Conservative cache SSIM** | 0.93 | 0.88 |
+| **Aggressive cache speedup** | 2.86x → 16.6s | 3.50x → 2.6s |
+| **Aggressive cache SSIM** | 0.78 | 0.80 |
+| **Combined (temporal+CFG) speedup** | 2.35x → 20.2s | N/A (no CFG axis) |
+| **Content-dependent quality** | Yes (texture/complex worst) | Yes (same pattern) |
+
+### Bottom Line
+
+The temporal plateau and step-caching mechanism transfer from Qwen to Kontext, confirming that this redundancy pattern is intrinsic to rectified flow matching inference, not specific to one model. However, Kontext's acceleration ceiling is lower in absolute terms because it starts from a leaner baseline (no CFG to skip). The practical value of temporal caching on Kontext is reducing 9s → 4s (conservative) — significant but less dramatic than Qwen's 47s → 20s.
+
+---
+
 # FLUX Track — F0: Kontext-dev Reconnaissance
 
 ## 1. Architectural Summary

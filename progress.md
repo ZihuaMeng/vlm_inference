@@ -1,5 +1,30 @@
 # Progress Log
 
+## 2026-03-28 — FLUX Track F1: Baseline, Profiling, and Temporal Transfer Test
+
+### Completed
+- Obtained B200 node (191.5 GB VRAM), activated existing venv
+- Installed sentencepiece 0.2.1 for T5 tokenizer
+- Downloaded FLUX.1 Kontext-dev weights (54 GB) to `PROJECT_BLUE_ROOT/weights/FLUX-Kontext-dev/`
+- Created output directories: `outputs/flux/`, `profiling/flux/`, `scripts/flux/`
+- **Phase 1**: Loaded Kontext-dev in bf16 (33.76 GB), ran baseline inference: 9.17s wall-clock, 37.52 GB peak VRAM, 1024x1024 output. Multi-image test fails (pipeline accepts single image only).
+- **Phase 2**: Three-level profiling. Denoising loop = 97.8%. Steps uniform (321.3ms ± 0.2ms). Attention = 73-75% of block time. Dual/single block cost ratio = 1.08x (not 2.4x as predicted from parameter counts).
+- **Phase 3**: Temporal redundancy characterization across all 28 steps. Three-phase pattern confirmed: convergence (steps 1-3), plateau (steps 4-23, cos > 0.999), divergence (steps 24-27, cos drops to 0.981). Same pattern as Qwen.
+- **Phase 4**: Temporal caching prototype with 5 test cases. Conservative (cache steps 6-20): 2.15x speedup, 0.883 mean SSIM. Aggressive (cache steps 4-23): 3.50x speedup, 0.800 mean SSIM. Same content-dependent quality pattern as Qwen.
+- Saved all output images (17 files), profiling data (3 JSON files), and scripts (4 Python files) in FLUX-specific directories
+- Updated findings.md with full F1 section including cross-model comparison table
+- Updated task_plan.md and progress.md
+
+### Key Results
+- **Kontext is 5.2x faster than Qwen baseline** (9.17s vs 47.4s) — driven by guidance distillation + fewer steps
+- **Temporal plateau transfers**: Same three-phase pattern, same cos > 0.999 in plateau region
+- **Temporal caching transfers**: Conservative schedule yields 2.15x with 0.883 SSIM
+- **Block cost surprise**: Dual-stream and single-stream blocks cost nearly the same (1.08x ratio), because attention dominates and both types process the same sequence length
+- **Milder divergence**: Kontext's final-step divergence (cos=0.981) is much milder than Qwen's (cos=0.816), suggesting guidance-distilled trajectories are smoother
+- **Acceleration ceiling is lower**: With no CFG axis to exploit, temporal caching alone provides 2.15x. Qwen achieved 2.35x from combined temporal+CFG. But Kontext starts from a much faster baseline (9s vs 47s).
+
+---
+
 ## 2026-03-28 — FLUX Track F0: Kontext-dev Reconnaissance
 
 ### Completed
