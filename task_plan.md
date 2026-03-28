@@ -1,6 +1,33 @@
 # Task Plan
 
-## Milestone 0: Workspace Init + Baseline Recon — COMPLETED
+## FLUX Track — F0: Kontext-dev Reconnaissance — COMPLETED
+
+Completed 2026-03-28. See findings.md "FLUX Track — F0" section for full results.
+
+### Scientific Questions Answered
+1. **Architecture?** 12B rectified flow transformer. 19 dual-stream + 38 single-stream = 57 blocks. Hidden dim 3072. CLIP-L + T5-XXL text encoders. Guidance-distilled (single pass).
+2. **Multi-image conditioning?** Sequence concatenation with per-image time-step offsets in 3D RoPE. Current release: single image only. Multi-image: architectural but unreleased.
+3. **Guidance vs Qwen?** Guidance-distilled (1 pass/step) vs Qwen's true CFG (2 passes/step). CFG-skip (M5) is NOT APPLICABLE — the unconditional pass doesn't exist.
+4. **Default steps/scheduler?** 28 steps, FlowMatchEulerDiscreteScheduler (same as Qwen). Velocity prediction with Euler integration.
+5. **VRAM?** ~34.4 GB weights in bf16, ~45-55 GB peak estimated. Fits on B200 (183 GB). Does NOT fit on L4 (23 GB) without offloading.
+6. **Dependencies?** Current venv compatible. Only missing: `sentencepiece` for T5 tokenizer.
+7. **Transfer assessment?** Temporal plateau (M4) and temporal caching (M6): LIKELY. CFG-skip (M5): NOT APPLICABLE. Block uniformity (M3): does NOT transfer. Multi-image scaling (M7): likely but untestable.
+
+### Tasks
+1. [x] Read FluxKontextPipeline source code
+2. [x] Read FluxTransformer2DModel source code (19 dual + 38 single blocks)
+3. [x] Read FlowMatchEulerDiscreteScheduler source code
+4. [x] Fetch HuggingFace model card and arXiv paper details
+5. [x] Produce structured Qwen vs Kontext comparison table
+6. [x] Assess transfer likelihood for each Qwen finding (M3-M9)
+7. [x] Check dependency compatibility and estimate VRAM
+8. [x] Create scripts/flux/ directory with architecture notes
+9. [x] Write GPU validation plan for F1
+10. [x] Update findings.md, progress.md, task_plan.md
+
+---
+
+## Qwen Track — Milestone 0: Workspace Init + Baseline Recon — COMPLETED
 
 Completed 2026-03-21. See findings.md for full results.
 - Created project layout on both storage tiers

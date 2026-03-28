@@ -1,5 +1,32 @@
 # Progress Log
 
+## 2026-03-28 — FLUX Track F0: Kontext-dev Reconnaissance
+
+### Completed
+- Verified FluxKontextPipeline available in current diffusers 0.38.0.dev0 venv (no upgrade needed)
+- Read pipeline source (pipeline_flux_kontext.py): identified single-pass guidance-distilled inference, 28 default steps, single reference image support, sequence concatenation mechanism
+- Read transformer source (transformer_flux.py): identified 19 dual-stream + 38 single-stream = 57 blocks, 3072 hidden dim, ~12B params, dual text encoder (CLIP-L + T5-XXL)
+- Read scheduler source (scheduling_flow_match_euler_discrete.py): confirmed same FlowMatchEulerDiscreteScheduler as Qwen, velocity prediction with Euler integration, dynamic shift based on sequence length
+- Fetched HuggingFace model card and arXiv:2506.15742 paper: confirmed 12B params, guidance-distilled, rectified flow matching, custom Flux-VAE with 16 latent channels
+- Built structured comparison table: Qwen (27.6B total, 80 passes, 40 steps, true CFG) vs Kontext (17.2B total, 28 passes, 28 steps, guidance-distilled)
+- Assessed transfer likelihood for each Qwen finding (M3-M9): temporal plateau and caching likely transfer; CFG-skip not applicable; block uniformity does not transfer
+- Verified dependency compatibility: all packages available, only `sentencepiece` needs installing
+- Estimated VRAM: ~34.4 GB weights, ~45-55 GB peak in bf16. Fits B200 with >120 GB headroom
+- Created scripts/flux/ directory with architecture_notes.md
+- Wrote GPU validation plan for F1: baseline → profiling → temporal redundancy → temporal caching
+- Updated findings.md, task_plan.md, progress.md
+
+### Key Findings
+- **Kontext is fundamentally faster by architecture**: 28 single-pass steps vs Qwen's 80 dual-pass steps. Estimated ~12-17s vs measured 47.4s on B200 — roughly 3-4x faster before any acceleration.
+- **CFG-skip is eliminated by design**: Guidance distillation makes the M5 axis permanently "applied" — no redundant unconditional pass exists to skip.
+- **Block heterogeneity is new**: 2 block types with ~2.4x cost difference. Profiling will show a step-function in per-block cost, unlike Qwen's flat profile.
+- **Temporal caching is the primary acceleration opportunity**: With CFG already eliminated, schedule-based acceleration reduces to temporal axis only. Expected ~1.5-1.8x from caching.
+- **Lower acceleration ceiling**: Qwen achieved 2.35x from combined CFG-skip + temporal cache. Kontext starts from a leaner baseline (28 single passes), so the ceiling for schedule-based acceleration is lower in absolute terms, though the model is already faster.
+- **Missing dependency**: `sentencepiece` needed for T5 tokenizer. Must install before loading model.
+- **Model is gated**: Requires HuggingFace access token and license acceptance to download weights.
+
+---
+
 ## 2026-03-21 — Milestone 9: Broad Validation + Ablation Study
 
 ### Completed

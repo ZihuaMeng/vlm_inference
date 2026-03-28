@@ -2,7 +2,265 @@
 
 ---
 
-# Milestone 9: Broad Validation + Ablation Study
+# FLUX Track — F0: Kontext-dev Reconnaissance
+
+## 1. Architectural Summary
+
+**FLUX.1 Kontext-dev** is a 12B-parameter guidance-distilled rectified flow transformer for image-to-image editing, released by Black Forest Labs (arXiv:2506.15742).
+
+| Aspect | Detail |
+|--------|--------|
+| **Architecture** | Rectified flow matching transformer in VAE latent space |
+| **Transformer params** | ~12B |
+| **Total model params** | ~17.2B (incl. text encoders + VAE) |
+| **Block structure** | 19 dual-stream (MMDiT) + 38 single-stream = 57 blocks |
+| **Hidden dimension** | 3072 (24 heads x 128 dim/head) |
+| **Text encoders** | CLIP-L (pooled, 77 tokens) + T5-v1_1-XXL (sequence, 512 tokens) |
+| **VAE** | Custom Flux-VAE, 16 latent channels |
+| **Guidance** | Guidance-distilled (single pass, embedded guidance_scale) |
+| **True CFG** | Available via `true_cfg_scale > 1.0`, disabled by default |
+| **Default steps** | 28 |
+| **Default guidance_scale** | 3.5 (pipeline) / 2.5 (model card) |
+| **Scheduler** | FlowMatchEulerDiscreteScheduler (velocity prediction, Euler integration) |
+| **Positional encoding** | 3D RoPE: (t, h, w) with axes_dim (16, 56, 56) |
+| **Conditioning** | AdaLN-Zero with shift/scale/gate from timestep + pooled text embeddings |
+| **Tokens at 1024x1024** | ~4096 per image (VAE 8x compress + 2x2 pack = 16x per dim) |
+
+### Block Types
+
+**Dual-stream blocks (19x, ~340M each = ~6.46B)**: Separate AdaLN-Zero normalization and FFN for text and image streams. Joint attention over concatenated text+image Q,K,V. Per-head RMSNorm on Q,K before attention. GELU(tanh) activation.
+
+**Single-stream blocks (38x, ~142M each = ~5.38B)**: Text and image tokens merged into a single sequence. Attention (pre_only) and MLP computed in parallel, concatenated, and projected back to model dim. More parameter-efficient per block but twice as many blocks.
+
+## 2. Multi-Image Conditioning Mechanism
+
+### How reference images are processed
+
+1. Reference image -> Flux-VAE encode -> apply shift/scale factors -> 2x2 spatial packing -> `image_latents` (shape: `[B, seq_len, C]`)
+2. **Positional IDs**: Target noise tokens get `(0, h, w)`, reference image tokens get `(1, h, w)`. This "virtual time-step offset" disambiguates generated vs. reference content in 3D RoPE space.
+3. **Sequence concatenation**: `latent_model_input = cat([noise_latents, image_latents], dim=1)` — reference image tokens appended to noise tokens along the sequence dimension.
+4. **Transformer processes the full concatenated sequence** through all 57 blocks.
+5. **Output slicing**: Only the noise-latent portion is kept as the noise prediction: `noise_pred = output[:, :noise_len]`.
+
+### Multi-image architectural support
+
+The paper describes multi-image conditioning via per-image time-step offsets: target=(0,h,w), img1=(1,h,w), img2=(2,h,w), etc. However, the current diffusers pipeline (`FluxKontextPipeline`) accepts only a **single reference image**. Multi-image is listed as future work in the paper.
+
+### Comparison to Qwen's mechanism
+
+| Aspect | Qwen-Image-Edit-2511 | FLUX.1 Kontext-dev |
+|--------|----------------------|---------------------|
+| **Multi-image support** | 1-3 images (released, active) | 1 image (released); N images (architectural, unreleased) |
+| **Concatenation** | Sequence dim: `[noise, img1, img2, ...]` | Sequence dim: `[noise, img_ref]` |
+| **Per-image identification** | Shared frame index (-1 for all condition images), spatial (h,w) positions | Virtual time-step offset (1, 2, ... per image) in 3D RoPE |
+| **Timestep modulation** | Zero-timestep for all condition images (shared) | Same — condition images at t=1 offset |
+| **Cross-image interaction** | Implicit via joint attention (no dedicated mechanism) | Same architecture, but untested with multiple images |
+| **Tokens per image (1024x1024)** | ~4,096 | ~4,096 |
+
+## 3. Structured Comparison: Qwen vs Kontext
+
+| Dimension | Qwen-Image-Edit-2511 | FLUX.1 Kontext-dev |
+|-----------|----------------------|---------------------|
+| **Total model params** | ~27.6B | ~17.2B |
+| **Transformer params** | ~19.5B | ~12B |
+| **Block count** | 60 (all dual-stream) | 57 (19 dual + 38 single) |
+| **Block uniformity** | All blocks identical type and cost | Two distinct block types; dual ~2.4x costlier than single |
+| **Hidden dim** | 3072 | 3072 |
+| **Attention heads** | — (same architecture family) | 24 x 128 |
+| **Text encoder** | Qwen2.5-VL-7B (~8B, joint vision-language) | CLIP-L (~0.43B) + T5-XXL (~4.7B) = ~5.1B |
+| **VAE** | Standard, few channels | Custom Flux-VAE, 16 latent channels |
+| **Guidance** | True CFG (dual pass, scale=4.0) | Guidance-distilled (single pass, scale=2.5-3.5) |
+| **Passes per step** | 2 (cond + uncond) | 1 (guidance embedded) |
+| **Default steps** | 40 | 28 |
+| **Total passes (default)** | 80 (40 steps x 2 passes) | 28 (28 steps x 1 pass) |
+| **Scheduler** | FlowMatchEulerDiscreteScheduler | FlowMatchEulerDiscreteScheduler |
+| **Positional encoding** | RoPE with frame indices | 3D RoPE (t, h, w) |
+| **Multi-image** | 1-3 images (production) | 1 image (current release) |
+| **Estimated bf16 VRAM (weights)** | ~55 GB | ~34.4 GB |
+| **Measured/est. peak VRAM** | 63.2 GB (measured on B200) | ~45-55 GB (estimated) |
+| **Per-step time on B200 (est.)** | 592ms/pass x 2 = 1184ms/step | ~400-600ms/pass x 1 (est.) |
+| **Estimated total time on B200** | 47.4s (40 steps, measured) | ~12-17s (28 steps, estimated) |
+
+### Key Architectural Differences
+
+1. **Guidance strategy is the biggest difference.** Qwen uses true CFG (2 passes/step), Kontext is guidance-distilled (1 pass/step). This alone makes Kontext ~2x faster per step in default configuration.
+
+2. **Block heterogeneity.** Qwen has 60 identical dual-stream blocks. Kontext has two types: 19 expensive dual-stream followed by 38 cheaper single-stream. This means Kontext's blocks are NOT uniformly expensive — profiling will show a cost step-function between block 18 and 19.
+
+3. **Smaller model.** 12B vs 19.5B transformer = ~38% fewer parameters. Combined with single-pass inference, the per-step compute is roughly 12B/19.5B * 1/2 = ~31% of Qwen's per-step compute.
+
+4. **Fewer steps.** 28 vs 40 default. Combined with single-pass, total passes = 28 vs 80 = 35% of Qwen's total passes.
+
+5. **Text encoder difference.** Qwen uses a vision-language model (Qwen2.5-VL-7B) that processes both text and image tokens. Kontext uses separate CLIP-L (text only, pooled) + T5-XXL (text only, sequence). Kontext's approach is more modular but cannot condition on image content at the text-encoder level.
+
+## 4. Transfer-Likelihood Assessment
+
+### M3: Structured Profiling (Block Uniformity, Attention Dominance)
+
+**Transfer: PARTIAL — methodology transfers, but results will differ.**
+
+- **What transfers**: The profiling methodology (pipeline stages, per-step timing, module-level hooks) applies identically to the Kontext pipeline.
+- **What differs**: Qwen's M3 found all 60 blocks identical in cost. Kontext has two block types with ~2.4x cost difference (dual ~340M vs single ~142M). The profiling will reveal a heterogeneous cost structure instead of a flat one.
+- **Attention dominance**: Joint attention should still dominate compute in dual-stream blocks. Single-stream blocks compute attention and MLP in parallel, so the per-block cost decomposition will differ.
+- **CFG doubling**: M3 found CFG doubles cost (cond + uncond). Kontext eliminates this by default — the per-step cost will be roughly half of what a hypothetical CFG-enabled Kontext run would show.
+
+### M4: Temporal Redundancy (Step-to-Step Plateau)
+
+**Transfer: LIKELY.**
+
+- **Architectural basis**: The temporal plateau is a property of the flow matching ODE trajectory, not of the specific transformer architecture. Both models use the same scheduler (FlowMatchEulerDiscreteScheduler) with the same velocity-prediction Euler integration.
+- **Expected pattern**: Convergence (early steps) -> plateau (mid steps) -> divergence (final steps). The exact step boundaries may shift due to 28 vs 40 steps and different shift parameters.
+- **Key uncertainty**: The guidance-distilled model bakes guidance into a single pass. The Qwen M4 finding showed both temporal AND CFG redundancy — the CFG axis doesn't exist in Kontext's default mode, so only the temporal axis is relevant.
+- **Prediction**: We expect a similar cosine similarity trajectory (>0.999 in mid-steps) but possibly compressed into the 28-step range.
+
+### M5: CFG-Skip
+
+**Transfer: NOT APPLICABLE.**
+
+- Kontext is guidance-distilled — there is no unconditional pass to skip. The guidance signal is embedded in the model weights and passed as a scalar (guidance_scale → guidance embedding).
+- When `true_cfg_scale > 1.0` is manually enabled, CFG-skip findings would apply. But this is not the default operating mode.
+- **Bottom line**: This entire acceleration axis is eliminated by architecture. Kontext gets the equivalent of "permanent CFG-skip" for free via guidance distillation.
+
+### M6: Temporal Step Caching
+
+**Transfer: LIKELY.**
+
+- Conservative uniform temporal caching (reuse noise prediction across consecutive steps) operates at the noise-prediction level, above the transformer architecture. It is architecture-agnostic.
+- If the temporal plateau exists (M4 transfer), then the same caching strategy should work: cache the full noise prediction for plateau steps, skip the transformer entirely.
+- **Key question**: With only 28 steps (vs 40), the plateau may be narrower. A cache window of 10-25 (M6 conservative) would need to be re-calibrated to Kontext's step range.
+- **Prediction**: The cache window will be narrower (perhaps 8-20 out of 28 steps), yielding a similar speedup ratio but fewer total cached steps.
+
+### M7: Multi-Image Superlinear Scaling
+
+**Transfer: LIKELY (architecturally) but UNTESTABLE (single-image release).**
+
+- Both architectures use sequence concatenation for multi-image conditioning with O(S^2) attention cost. FlashAttention would produce the same sub-quadratic wall-clock scaling.
+- However, Kontext's current release only supports a single reference image. Multi-image scaling cannot be tested without modifying the pipeline.
+- **If/when multi-image is released**: Expect similar O(S^1.4) wall-clock scaling. The findings about orthogonal cross-image hidden states and minimal cross-image attention should also hold, since the attention mechanism is architecturally similar.
+
+### Combined Acceleration (M8/M9)
+
+**Transfer: PARTIAL.**
+
+- Kontext's default mode already eliminates the CFG axis. The combined M8 strategy (temporal cache + CFG-skip) reduces to temporal cache only.
+- The 2.35x speedup from M8/M9 was achieved by combining both axes (80→34 passes). Kontext starts at 28 passes (no CFG) — applying temporal caching alone might yield ~1.5-1.8x (caching ~10-15 of 28 steps).
+- The absolute speedup ceiling for schedule-based acceleration is lower because the baseline is already lean (single-pass, 28 steps).
+
+### Summary Table
+
+| Finding | Transfer Likelihood | Reasoning |
+|---------|-------------------|-----------|
+| M3: Profiling methodology | **Transfers** | Same framework, same profiling approach |
+| M3: Uniform block cost | **Does NOT transfer** | Kontext has 2 block types with 2.4x cost difference |
+| M4: Temporal plateau | **Likely** | Same scheduler, same ODE trajectory dynamics |
+| M5: CFG-skip | **Not applicable** | Guidance-distilled = no CFG to skip |
+| M6: Temporal caching | **Likely** | Architecture-agnostic; depends on M4 plateau |
+| M7: Multi-image scaling | **Likely** (architectural) | Same attention mechanism; untestable on current release |
+| M8/M9: Combined speedup | **Partial** | Only temporal axis applies; lower ceiling |
+
+## 5. Dependency and VRAM Analysis
+
+### Dependency Compatibility
+
+| Package | Current Version | Kontext Compatible? | Notes |
+|---------|----------------|-------------------|-------|
+| torch | 2.10.0+cu128 | YES | |
+| diffusers | 0.38.0.dev0 | YES | FluxKontextPipeline present |
+| transformers | 5.3.0 | YES | CLIPTextModel, T5EncoderModel available |
+| accelerate | 1.13.0 | YES | |
+| **sentencepiece** | **NOT INSTALLED** | **NEEDED** | Required for T5 tokenizer |
+
+**Action needed**: `pip install sentencepiece` before loading Kontext. This is the only missing dependency. No other changes to the venv are required, and installing sentencepiece will not affect Qwen pipeline compatibility.
+
+### VRAM Estimate
+
+| Component | Parameters | bf16 Size |
+|-----------|-----------|-----------|
+| Flux transformer | ~12.0B | ~24.0 GB |
+| T5-v1_1-XXL encoder | ~4.7B | ~9.4 GB |
+| CLIP-L text encoder | ~0.43B | ~0.86 GB |
+| Flux-VAE | ~0.08B | ~0.16 GB |
+| **Total model weights** | **~17.2B** | **~34.4 GB** |
+| Activations + KV cache (est., 1024x1024) | — | ~10-20 GB |
+| **Estimated peak** | — | **~45-55 GB** |
+
+### Hardware Compatibility
+
+| Hardware | VRAM | Fit in bf16? | Notes |
+|----------|------|-------------|-------|
+| **B200** | 183 GB | **YES** | ~45-55 GB peak, >120 GB headroom |
+| **L4** | 23 GB | **NO** | Requires sequential CPU offload (~4 GB peak) |
+| **A100-80G** | 80 GB | **YES** | Tight but feasible with ~25 GB headroom |
+| **A100-40G** | 40 GB | **MAYBE** | Weights alone ~34.4 GB, may need 8-bit or offload |
+
+B200 is the clear target for acceleration experiments. L4 could be used for functional validation with offloading.
+
+## 6. GPU Validation Plan — Milestone F1
+
+### Objective
+
+Establish a native-speed baseline for FLUX.1 Kontext-dev on B200, analogous to Qwen M2. Verify the architecture works, measure real timing and VRAM, and run the first temporal redundancy characterization.
+
+### Prerequisites
+
+1. Access to B200 node
+2. Install sentencepiece: `pip install sentencepiece`
+3. Download FLUX.1-Kontext-dev weights (~24 GB for transformer, ~10 GB for T5-XXL, ~1 GB for CLIP-L + VAE). Total ~35 GB. Requires HuggingFace access token (gated model).
+4. Accept model license on HuggingFace (non-commercial research license)
+
+### Phase 1: Load + Baseline (analogous to M2)
+
+1. Load FluxKontextPipeline in full bf16 on B200
+2. Run single image-to-image pass: reference image + edit prompt, 28 steps, guidance_scale=2.5
+3. Measure: load time, generation time, per-step time, peak VRAM
+4. Save output image
+5. Compare measured values to our estimates above
+
+**Expected outcome**: ~12-17s generation, ~45-55 GB peak VRAM, successful image output.
+
+### Phase 2: Profiling (analogous to M3)
+
+1. Pipeline-stage timing (text encode, VAE, denoising loop)
+2. Per-step timing within the denoising loop
+3. Module-level timing: dual-stream blocks vs single-stream blocks vs other
+4. Verify block heterogeneity: do dual-stream blocks cost ~2.4x more than single-stream?
+
+**Expected outcome**: Denoising loop dominates (>99%). Dual-stream blocks are costlier. Per-step time ~400-600ms.
+
+### Phase 3: Temporal Redundancy (analogous to M4)
+
+1. Instrument consecutive-step cosine similarity on transformer output
+2. Instrument 5 sampled blocks: 2 dual-stream (e.g., 0, 9), 2 single-stream (e.g., 25, 45), 1 boundary (18)
+3. Map the convergence → plateau → divergence trajectory over 28 steps
+4. Determine optimal temporal cache window for Kontext
+
+**Expected outcome**: Similar temporal plateau (cos >0.999) in mid-steps, compressed to 28-step range.
+
+### Phase 4: Temporal Caching Prototype (analogous to M6)
+
+1. Implement conservative uniform temporal caching for Kontext
+2. Calibrate cache window based on Phase 3 results
+3. Measure speedup and quality (SSIM, LPIPS) across 5 diverse test cases
+4. Compare speedup ratio to Qwen M6 conservative (1.66x)
+
+**Expected outcome**: ~1.5-1.8x speedup from temporal caching alone.
+
+### Hardware Requirement
+
+- **B200** (183 GB VRAM) for all phases
+- CPU-only not suitable (no inference needed for F0, but F1 requires GPU)
+
+### Evidence to Produce
+
+1. Measured VRAM and timing (validates our estimates)
+2. Per-step timing profile (reveals block heterogeneity)
+3. Temporal redundancy trajectory (determines cache window)
+4. Temporal caching results (validates transfer from Qwen M6)
+5. Quality metrics on diverse test cases
+
+---
+
+# Qwen Track — Milestone 9: Broad Validation + Ablation Study
 
 ## 1. Test Suite Description
 
