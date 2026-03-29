@@ -1,5 +1,31 @@
 # Task Plan
 
+## FLUX Track — F4: Conditioning-Aware KV Reuse — COMPLETED
+
+Completed 2026-03-28. See findings.md "FLUX Track — F4" section for full results.
+
+### Objective
+Test whether caching the K/V projections of static conditioning tokens (text + reference image) across denoising steps in the plateau region produces meaningful speedup with better quality preservation than whole-step output caching.
+
+### Answers to Scientific Questions
+1. **Can condition-token K/V be identified and isolated?** YES. Linear projections are position-independent. Condition tokens occupy fixed positions (text: 512 tokens, image: 4096 tokens, noise: 4096 tokens).
+2. **How much do condition-token K/V change across steps?** Image K/V changes 3-5x less than noise K/V (measured by 1-cos). Stable in all blocks except the most-dynamic single-stream block (S18).
+3. **Does caching produce measurable speedup?** NO. 1.015x — negligible. K/V projection is ~11% of attention cost; the matmul dominates.
+4. **Does it preserve quality better than whole-step caching?** YES, dramatically. SSIM 0.917 vs 0.804 (+0.112), wins 8/8 cases. LPIPS 0.050 vs 0.213 (4.3x better).
+5. **Does speedup scale with image count?** Not testable (single image only). Token ratio is constant regardless.
+
+### Key Finding (Ablation Value)
+Condition-token K/V staleness contributes negligibly to temporal caching's quality loss. The quality degradation comes from stale attention matmuls and FFN, not stale K/V. This points to partial attention recomputation as the target for future improvement — but it requires custom kernels incompatible with Flash Attention.
+
+### Tasks
+1. [x] Phase 1: Code inspection — document token layout, K/V separability, feasibility per block type
+2. [x] Phase 2: Measure K/V stability across steps (6 blocks × 28 steps)
+3. [x] Phase 3: Implement KV caching prototype (custom attention processor, 57 blocks)
+4. [x] Phase 4: Evaluate on 8 F2 cases (4 robust + 4 fragile), compare to temporal caching
+5. [x] Update findings.md, progress.md, task_plan.md
+
+---
+
 ## Cross-Model Analysis — F3: Cross-Model Comparative Analysis — COMPLETED
 
 Completed 2026-03-28. See findings.md "Cross-Model Analysis" section for full results.

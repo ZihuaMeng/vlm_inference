@@ -1,5 +1,46 @@
 # Progress Log
 
+## 2026-03-28 — F4: Conditioning-Aware KV Reuse
+
+### Completed
+- Verified B200 GPU (183 GB VRAM), activated venv, loaded planning files
+- Phase 1: Inspected FluxKontextPipeline and transformer source code
+  - Documented token layout: [text 512 | noise 4096 | image_cond 4096] = 8704 total
+  - Identified K/V separability: linear projections are position-independent, condition tokens at fixed positions
+  - Assessed feasibility: both dual-stream (19 blocks) and single-stream (38 blocks) support selective K/V caching
+- Phase 2: Wrote and ran f4_kv_measurement.py (instrumented attention processor capturing K/V per token type)
+  - Measured K/V cosine similarity across all 28 steps at 6 sampled blocks (3 dual, 3 single)
+  - Found image K/V changes 3-5x less than noise K/V in plateau (5/6 blocks)
+  - Exception: single_18 (most dynamic block, analogous to Qwen block 44) shows reversed pattern
+  - Premise partially supported: stability gap is real but small in absolute terms
+- Phase 3: Wrote f4_kv_cache_prototype.py with custom KVCachingProcessor
+  - Custom attention processor caches condition K/V at first plateau step, reuses on subsequent steps
+  - Fresh noise K/V and fresh Q for all tokens computed each step; full attention matmul runs
+  - Applied to all 57 blocks during plateau region (steps 6-20)
+- Phase 4: Evaluated on 8 F2 test cases (4 robust + 4 fragile) in 3 modes (baseline, KV cached, temporal cached)
+  - 24 total inference runs on B200
+  - Computed SSIM and LPIPS for both cached modes vs paired baselines
+- Updated findings.md, task_plan.md, progress.md
+
+### Key Results
+- **KV caching quality: dramatically better** — SSIM 0.917 vs temporal 0.804 (+0.112 gap, wins 8/8 cases)
+- **KV caching speedup: negligible** — 1.015x vs temporal 2.154x
+- **Fragile cases benefit most**: KV SSIM 0.878 vs TC 0.710 (+0.168)
+- **Most dramatic case**: complex_scene — KV 0.732 vs TC 0.442 (nearly 2x SSIM)
+- **Ablation insight**: Quality loss in temporal caching comes from stale attention matmuls/FFN, NOT from stale condition K/V
+- **K/V projection is only ~11% of attention cost** → savings are inherently limited
+- **Practical verdict**: Negligible speedup makes KV-only caching impractical for acceleration
+- **Scientific verdict**: Valuable ablation identifying that the attention matmul is the quality bottleneck, and that condition K/V staleness is not the problem. Future work should target partial attention recomputation.
+
+### Artifacts
+- scripts/flux/f4_kv_measurement.py — K/V stability measurement script
+- scripts/flux/f4_kv_cache_prototype.py — KV caching prototype + evaluation
+- outputs/flux/f4_kv_reuse/f4_kv_measurement.json — stability measurement data
+- outputs/flux/f4_kv_reuse/f4_kv_cache_results.json — evaluation results
+- outputs/flux/f4_kv_reuse/*.png — 24 output images (8 cases × 3 modes)
+
+---
+
 ## 2026-03-28 — F3: Cross-Model Comparative Analysis
 
 ### Completed

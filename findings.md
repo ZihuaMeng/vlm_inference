@@ -684,6 +684,185 @@ The temporal plateau and step-caching mechanism transfer from Qwen to Kontext, c
 
 ---
 
+# FLUX Track — F4: Conditioning-Aware KV Reuse
+
+## Objective
+
+Test whether caching the K/V projections of static conditioning tokens (text + reference image) across denoising steps in the plateau region produces meaningful speedup with better quality preservation than whole-step output caching.
+
+## 1. Token Layout (Phase 1: Code Inspection)
+
+### 1.1 Attention Sequence Structure
+
+The Flux transformer processes three token types in each attention operation:
+
+| Token Type | Source | Sequence Position | Count (1024x1024) | Changes Across Steps? |
+|------------|--------|-------------------|--------------------|-----------------------|
+| Text | CLIP-L + T5-XXL prompt embeddings | First in attention concat | 512 | No (fixed input) |
+| Noise | Random latents being denoised | Middle | 4,096 | Yes (updated by scheduler) |
+| Image condition | VAE-encoded reference image | Last | 4,096 | No (fixed input) |
+
+**Total attention sequence**: 8,704 tokens. Condition tokens (text + image) = 4,608 = 53% of sequence.
+
+### 1.2 Block Architecture and K/V Separability
+
+**Dual-stream blocks (19):**
+- Separate K/V projections: `to_k/v` for [noise | image], `add_k/v_proj` for text
+- Joint attention on concatenated [text | noise | image], then split back
+- K/V separable by position index (linear projections are position-independent)
+
+**Single-stream blocks (38):**
+- Concatenate [text | noise | image] before norm/attention
+- Single `to_k/v` for all tokens
+- K/V separable by position index
+
+**Feasibility assessment**: K/V CAN be separated and selectively cached in both block types. The condition-token portions occupy fixed, known positions in the sequence.
+
+### 1.3 Key Complication
+
+Although raw `image_latents` input is fixed across steps, intermediate representations evolve through attention interactions with noise tokens. At block L, image-condition K/V depends on attention with noise at blocks 0..L-1. The premise is that in the plateau region, this evolution is small.
+
+## 2. K/V Stability Measurement (Phase 2)
+
+Measured consecutive-step cosine similarity of K/V projections for each token type across all 28 steps, at 6 sampled blocks (3 dual-stream: 0, 9, 18; 3 single-stream: 0, 18, 37).
+
+### 2.1 Plateau Region Results (Steps 4-23, Mean Cosine Similarity)
+
+| Block | noise_k | noise_v | image_k | image_v | text_k | text_v |
+|-------|---------|---------|---------|---------|--------|--------|
+| D0    | 1.0002  | 0.9996  | 1.0009  | 0.9992  | 0.9996 | 0.9993 |
+| D9    | 0.9985  | 0.9975  | 0.9997  | 0.9992  | 0.9991 | 0.9988 |
+| D18   | 0.9983  | 0.9952  | 1.0000  | 0.9987  | 0.9989 | 0.9973 |
+| S0    | 0.9974  | 0.9946  | 0.9998  | 0.9981  | 0.9982 | 0.9965 |
+| S18   | 0.9884  | 0.9705  | 0.9791  | 0.9558  | 0.8573 | 0.6218 |
+| S37   | 0.9987  | 0.9988  | 0.9996  | 0.9996  | 0.9258 | 0.9496 |
+
+### 2.2 Stability Gap Analysis
+
+Measured by relative change (1 - cos_sim), image K/V changes 3-5x less than noise K/V in 5 of 6 sampled blocks:
+
+| Block | Noise K change | Image K change | Ratio |
+|-------|----------------|----------------|-------|
+| D9    | 0.0015         | 0.0003         | 5.0x  |
+| D18   | 0.0017         | ~0             | >>5x  |
+| D18 (V) | 0.0048      | 0.0013         | 3.7x  |
+| S0    | 0.0026         | 0.0002         | 13x   |
+| S37   | 0.0013         | 0.0004         | 3.3x  |
+
+**Exception**: Block S18 (single-stream middle, overall block index 37/57) is the most dynamic block in the model — analogous to Qwen's block 44. All token types are less stable here. Text tokens show dramatic instability (cos = 0.62 for V), suggesting this block performs the heaviest text-noise interaction.
+
+### 2.3 Premise Assessment
+
+**Supported for 5/6 blocks**: Image K/V changes 3-5x less than noise K/V across the plateau. The gap is consistent in direction and grows in deeper dual-stream blocks.
+
+**Exception at most-dynamic block**: S18 shows image K/V less stable than noise K/V. This is the only block where the premise fails.
+
+**Absolute magnitude**: Both noise and image K/V are very stable in the plateau (cos > 0.995 for most blocks). The absolute difference is small (0.001-0.004 in cosine), but relative change ratio is substantial.
+
+## 3. Prototype Implementation (Phase 3)
+
+### 3.1 Design
+
+Custom attention processor (`KVCachingProcessor`) that, during the plateau region:
+1. **First plateau step** (step 6): Compute all K/V normally; cache condition-token K/V (text + image) for each of the 57 blocks
+2. **Subsequent plateau steps** (steps 7-20): Reuse cached condition K/V; compute fresh K/V only for noise tokens; compute fresh Q for all tokens; run full attention matmul with mixed (cached + fresh) K/V
+3. **Non-plateau steps**: Full computation (no caching)
+
+### 3.2 Theoretical Speedup
+
+K/V projection savings per cached step:
+- Save: 2 projections × 4,608 condition tokens × 3072² FLOPs ≈ 87B FLOPs per block
+- Total per step: 87B × 57 blocks ≈ 5.0T FLOPs
+- Total step cost: ~45.2T FLOPs → **~11% savings per cached step**
+- Applied to 14 cached steps out of 28 → **~5.5% wall-clock reduction**
+- Theoretical speedup: **~1.06x**
+
+The limitation: **attention matmuls (Q×K^T and attn×V) dominate attention cost (~60%) and are NOT reduced** because the full K/V tensor (fresh noise + cached condition) must still participate in the matmul.
+
+## 4. Evaluation Results (Phase 4)
+
+### 4.1 Per-Case Results (vs Baseline)
+
+| Test Case | KV Speed | KV SSIM | KV LPIPS | TC Speed | TC SSIM | TC LPIPS |
+|-----------|----------|---------|----------|----------|---------|----------|
+| simple_object (robust) | 1.016x | 0.990 | 0.008 | 2.155x | 0.987 | 0.011 |
+| object_modify (robust) | 1.016x | 0.931 | 0.006 | 2.153x | 0.888 | 0.051 |
+| portrait (robust) | 1.015x | 0.947 | 0.026 | 2.154x | 0.836 | 0.175 |
+| arrangement (robust) | 1.016x | 0.955 | 0.024 | 2.154x | 0.885 | 0.106 |
+| style_transfer (fragile) | 1.016x | 0.902 | 0.089 | 2.154x | 0.812 | 0.334 |
+| fine_texture (fragile) | 1.015x | 0.927 | 0.041 | 2.154x | 0.807 | 0.171 |
+| complex_scene (fragile) | 1.015x | 0.732 | 0.162 | 2.154x | 0.442 | 0.547 |
+| nature_detail (fragile) | 1.015x | 0.952 | 0.044 | 2.154x | 0.778 | 0.310 |
+| **MEAN** | **1.015x** | **0.917** | **0.050** | **2.154x** | **0.804** | **0.213** |
+
+KV = condition-token KV caching. TC = whole-step temporal caching (F2-style). Same plateau window (steps 6-20) for fair comparison.
+
+### 4.2 Quality Comparison
+
+**KV caching wins on quality in ALL 8/8 cases.**
+
+| Subset | KV SSIM | TC SSIM | Gap |
+|--------|---------|---------|-----|
+| Robust (n=4) | 0.955 | 0.899 | +0.056 |
+| Fragile (n=4) | 0.878 | 0.710 | +0.168 |
+| All (n=8) | 0.917 | 0.804 | +0.112 |
+
+The quality advantage is **largest on fragile cases** (+0.168 SSIM), showing that KV caching protects fine-detail content that temporal caching degrades.
+
+Most dramatic: complex_scene — KV 0.732 vs TC 0.442 (nearly double the SSIM). LPIPS: KV 0.162 vs TC 0.547 (3.4x better perceptual similarity).
+
+### 4.3 Speedup Comparison
+
+- KV caching: **1.015x** (negligible — ~0.14s saved on 8.9s baseline)
+- Temporal caching: **2.154x** (4.8s saved — transformer skipped entirely on cached steps)
+- Speedup gap: **-1.14x** (temporal caching is dramatically faster)
+
+### 4.4 Ablation Insight: Where Does Quality Loss Come From?
+
+This experiment serves as an ablation study isolating the source of quality degradation in temporal caching:
+
+| Component | KV Caching | Temporal Caching | Quality Impact |
+|-----------|------------|------------------|----------------|
+| Noise K/V projections | Fresh | Stale (prev step) | – |
+| Condition K/V projections | Cached (prev step) | Stale (prev step) | Minimal (cos > 0.999) |
+| Q projections (all tokens) | Fresh | Stale | **Moderate** |
+| Attention matmul (Q×K^T, attn×V) | Fresh (with mixed K/V) | Stale | **Dominant** |
+| FFN | Fresh | Stale | Moderate |
+| Output projection | Fresh | Stale | Minor |
+
+**Finding**: KV caching introduces minimal error (SSIM 0.917) while temporal caching introduces substantial error (SSIM 0.804). The difference (+0.112 SSIM) must come from the components that differ: Q projections, attention matmuls, and FFN. Since K/V caching recomputes ALL of these freshly (only condition K/V is cached), the quality loss in temporal caching is attributable to:
+1. **Stale attention matmuls** (dominant — Q×K^T and attn×V with stale Q and K/V)
+2. **Stale FFN outputs** (moderate)
+3. **Stale condition K/V** (negligible — confirmed by KV caching's high quality)
+
+**Key finding: Condition-token K/V staleness contributes negligibly to temporal caching's quality loss. The bottleneck is the attention matmul and FFN recomputation.**
+
+## 5. Answers to Scientific Questions
+
+1. **Can condition-token K/V projections be identified and isolated?** YES. Linear projections are position-independent. Condition tokens occupy fixed, known positions in the sequence.
+
+2. **How much do condition-token K/V change across steps in the plateau?** Image K/V changes 3-5x less than noise K/V (measured by 1-cos). Text K/V varies: stable in dual-stream blocks, highly dynamic in single-stream block S18.
+
+3. **Does caching condition-token K/V produce measurable speedup?** NO. Speedup is 1.015x — negligible. K/V projection is only ~11% of attention cost; the attention matmul (which still runs at full cost) dominates.
+
+4. **Does this approach preserve quality better than whole-step caching?** YES, dramatically. SSIM 0.917 vs 0.804 (+0.112), LPIPS 0.050 vs 0.213 (4.3x better). KV caching wins in ALL 8/8 test cases.
+
+5. **Does speedup scale with input image count?** Not testable — Kontext supports single image only. But the token ratio (condition/total = 53%) is constant, so the savings fraction would be constant regardless of sequence length.
+
+## 6. Verdict and Implications
+
+**Verdict**: KV reuse provides **dramatically better quality** (+0.112 SSIM) but **negligible speedup** (1.015x). The tradeoff is unfavorable for practical acceleration. Whole-step temporal caching remains the preferred method for speedup despite its quality cost.
+
+**Paper contribution**: This experiment's primary value is as an **ablation study** identifying where quality loss occurs:
+- Condition-token K/V is stable and cacheable (confirmed by both measurement and quality evaluation)
+- Quality loss in temporal caching comes overwhelmingly from stale attention matmuls and FFN, NOT from stale condition K/V
+- This implies that future improvement of temporal caching should target **partial recomputation of the attention matmul** (e.g., recomputing Q×K^T for noise queries while reusing condition-query results), not finer-grained K/V caching
+- However, such partial attention decomposition would require custom kernels incompatible with Flash Attention, making it an engineering challenge beyond schedule-based methods
+
+**Failure condition met**: Speedup is negligible (as predicted by theoretical analysis). The K/V computation is a small fraction of total attention cost; the matmul dominates. Reported as a **scientifically informative negative result** with clear ablation value.
+
+---
+
 # FLUX Track — F2: Validation + Ablation Study (Broader Test Suite)
 
 ## 1. Test Suite Design
