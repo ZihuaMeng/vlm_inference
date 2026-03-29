@@ -1,5 +1,73 @@
 # Progress Log
 
+## 2026-03-28 — F3: Cross-Model Comparative Analysis
+
+### Completed
+- Read all planning files (task_plan.md, progress.md, findings.md)
+- Loaded M9 results (m9_results.csv: 18 cases × 4 configs), F2 results (f2_results.csv: 12 cases × 3 configs)
+- Loaded Qwen redundancy data (redundancy_results.json: 40-step temporal + CFG profiles, 5 sampled blocks)
+- Loaded FLUX redundancy data (f1_redundancy_results.json: 28-step temporal profile, 6 sampled blocks)
+- Loaded Qwen profiling data (profiling_results.json: 3-level pipeline/step/module breakdown)
+- Loaded FLUX profiling data (f1_profiling_results.json: 3-level breakdown)
+- Wrote 6-section cross-model analysis in findings.md:
+  1. Profiling Comparison: pipeline cost, per-step timing, 5.2x decomposition, module-level with attention dominance
+  2. Temporal Redundancy Comparison: three-phase pattern confirmation, plateau boundaries, normalized trajectory overlay, divergence severity, block-level dynamics, CFG redundancy
+  3. Acceleration Comparison: all 6 tested configs, speedup reliability, dual-axis advantage, absolute timing, Qwen ablation
+  4. Quality Boundary Analysis: bimodal distribution, content-type failure overlap, difficulty predictor, severity explanation
+  5. Paper Claim Structure: 5 explicit claims with evidence pointers and limitations
+  6. Evidence Gaps: 3 small follow-up opportunities, 5 larger future work items, 3 potential inconsistencies, paper-readiness assessment
+- Updated task_plan.md with F3 section
+- Updated progress.md
+
+### Key Findings
+
+**Shared structure (method/scheduler-intrinsic):**
+- Temporal plateau: convergence → plateau (cos>0.999) → divergence on both models
+- Denoising loop dominance: >97% of cost on both
+- Step uniformity: CV < 0.15% on both
+- Attention dominance: ~75% of block time on both
+- Bimodal quality distribution with same failure content types
+
+**Key differences (architecture-specific):**
+- Plateau coverage: Kontext 74% vs Qwen 67% (guidance distillation smooths trajectory)
+- Divergence: Kontext cos=0.981 vs Qwen cos=0.816 (10x milder)
+- Acceleration axes: Qwen has 2 (CFG + temporal), Kontext has 1 (temporal only)
+- Dual-axis advantage: Qwen combined (2.35x, 0.836 SSIM) > Kontext single (2.15x, 0.754 SSIM)
+
+**Paper claims identified (5):**
+1. Temporal plateau is structural to rectified flow matching (strong evidence)
+2. Temporal step-caching transfers across architectures (strong)
+3. Dual-axis acceleration outperforms single-axis (moderate-to-strong)
+4. Content-type quality boundary is method-intrinsic (strong)
+5. Schedule-based acceleration has a quality ceiling (moderate)
+
+**Evidence gaps:** Shared scheduler is a confound for Claim 1; test suites not perfectly matched; N=2 models is sufficient for initial study but a third model would strengthen claims. No follow-up GPU measurements needed — existing data is sufficient.
+
+---
+
+## 2026-03-28 — FLUX Track F2: Validation + Ablation Study
+
+### Completed
+- Verified B200 GPU (183 GB VRAM), activated venv, confirmed FLUX weights and LPIPS available
+- Reviewed F1 scripts and results to replicate caching schedules
+- Designed 12-case test suite: 4 easy, 4 medium, 4 hard, covering 12 distinct edit types
+- Wrote `scripts/flux/f2_validation.py` — single script running 3 configs per case with SSIM + LPIPS
+- Ran full evaluation: 12 cases × 3 configs = 36 inference runs (~6 min total on B200)
+- Computed SSIM and LPIPS for all 24 non-baseline outputs vs paired baselines
+- Saved 36 output images + JSON + CSV results
+- Updated findings.md with 7-section analysis including cross-model comparison
+
+### Key Results
+- **Speedup holds perfectly**: 2.15x conservative and 3.50x aggressive, matching theory exactly (std=0.001)
+- **Quality significantly lower than F1 suggested**: mean SSIM 0.754 conservative (vs F1's 0.883). F1's 5-case suite was unrepresentatively optimistic
+- **Bimodal distribution**: 33% of cases SSIM > 0.90 (structural), 50% SSIM < 0.80 (fine-detail)
+- **Same failure pattern as Qwen**: fine_texture (0.37), complex_scene (0.42), style_transfer (0.68) — same content types degrade on both models
+- **Difficulty is strongest predictor**: easy 0.892, medium 0.826, hard 0.543 mean SSIM
+- **Cross-model comparison**: Kontext conservative (2.15x, 0.754 SSIM) vs Qwen combined (2.35x, 0.836 SSIM) — Kontext is worse on quality, lacks CFG axis
+- **Transfer claim qualified**: mechanism transfers, but quality tradeoff is less favorable. Content-type gating remains necessary
+
+---
+
 ## 2026-03-28 — FLUX Track F1: Baseline, Profiling, and Temporal Transfer Test
 
 ### Completed

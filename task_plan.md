@@ -1,5 +1,51 @@
 # Task Plan
 
+## Cross-Model Analysis — F3: Cross-Model Comparative Analysis — COMPLETED
+
+Completed 2026-03-28. See findings.md "Cross-Model Analysis" section for full results.
+
+### Objective
+Produce the paper's central comparative artifact: a structured cross-model analysis synthesizing all Qwen (M0–M9) and FLUX (F0–F2) findings into a coherent narrative with supporting tables.
+
+### Answers to Scientific Questions
+1. **What is the common structure across both models?** Temporal plateau (convergence → plateau → divergence), attention dominance (~75%), denoising loop concentration (>97%), bimodal quality distribution, step uniformity. All are structural to rectified flow matching inference.
+2. **What differs, and why?** Guidance strategy (true CFG vs distilled), block structure (homogeneous vs heterogeneous-but-equal-cost), divergence severity (Qwen dramatic cos=0.816 vs Kontext mild cos=0.981), acceleration axes available (2 vs 1).
+3. **What does the comparison reveal about method vs models?** Temporal caching is architectural — same plateau pattern on both. Quality boundary is method-intrinsic — same failure content types on both. Dual-axis access (Qwen) improves quality at comparable speedup vs single-axis (Kontext).
+4. **What is the strongest defensible claim?** Temporal plateau is structural to rectified flow matching; content-type quality boundary is method-intrinsic (not model-specific).
+
+### Tasks
+1. [x] Bootstrap: read all planning files, load M9/F2 data, load redundancy/profiling JSONs
+2. [x] Section 1: Profiling comparison (pipeline cost, per-step, module-level, 5.2x decomposition)
+3. [x] Section 2: Temporal redundancy comparison (plateau boundaries, normalized overlay, divergence, block-level, CFG)
+4. [x] Section 3: Acceleration comparison (all configs, dual-axis advantage, absolute timing, ablation)
+5. [x] Section 4: Quality boundary analysis (bimodal distribution, content-type overlap, difficulty predictor, severity explanation)
+6. [x] Section 5: Paper claim structure (5 claims with evidence and limitations)
+7. [x] Section 6: Evidence gaps and remaining questions
+8. [x] Update task_plan.md and progress.md
+
+---
+
+## FLUX Track — F2: Validation + Ablation Study — COMPLETED
+
+Completed 2026-03-28. See findings.md "FLUX Track — F2" section for full results.
+
+### Answers to Scientific Questions
+1. **Does the 2.15x conservative speedup hold across diverse inputs?** YES. 2.154x ± 0.001 across all 12 cases. Perfectly consistent — independent of content or difficulty.
+2. **Does mean SSIM ~0.88 hold, or does it shift?** It SHIFTS DOWN significantly. Mean SSIM = 0.754 (vs F1's 0.883). F1's 5-case suite was unrepresentatively optimistic.
+3. **What is the quality distribution? Is it bimodal?** YES, bimodal. Robust cluster (0.83-0.99, structural content) and fragile cluster (0.37-0.74, fine-detail content). 33% SSIM > 0.90, 50% SSIM < 0.80.
+4. **Are failure cases similar to or different from Qwen's?** SAME. Both models degrade on fine_texture, complex_scene, style_transfer, nature_detail, identity_preserving. This is a method limitation, not model-specific.
+5. **Does the quality/speedup tradeoff match Qwen's?** WORSE. Kontext conservative (2.15x, 0.754 SSIM) underperforms Qwen combined (2.35x, 0.836 SSIM) because Kontext lacks the CFG axis and bears quality cost entirely on temporal caching.
+
+### Tasks
+1. [x] Bootstrap: verify B200, activate venv, confirm FLUX weights and LPIPS
+2. [x] Design 12-case test suite (4 easy, 4 medium, 4 hard, 12 edit types)
+3. [x] Write f2_validation.py (3 configs × 12 cases, SSIM + LPIPS)
+4. [x] Run validation: 36 inference runs on B200
+5. [x] Analyze: aggregates, quality distribution, failure analysis, cross-model comparison
+6. [x] Update findings.md, progress.md, task_plan.md
+
+---
+
 ## FLUX Track — F1: Baseline, Profiling, and Temporal Transfer Test — COMPLETED
 
 Completed 2026-03-28. See findings.md "FLUX Track — F1" section for full results.
