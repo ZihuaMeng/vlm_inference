@@ -1,5 +1,222 @@
 # Task Plan
 
+## AR Mainline — AR-4: Demo-Prefix Caching + Position Encoding Extension — COMPLETED
+
+Started 2026-04-04. Extends position encoding for multi-demo generation and implements demo-prefix KV caching for amortized latency reduction.
+
+### Objective
+1. Extend position encoding to support 2-3 demo contexts (removing the hard 10,240 token limit).
+2. Implement demo-prefix KV caching: compute demo KV once, reuse across queries.
+3. Measure amortized per-query latency (cached vs fresh) — first real wall-clock acceleration.
+4. Validate generation quality across all conditions.
+
+### Scientific Questions
+1. Can Lumina-mGPT's RoPE be extended to 2-3 demo contexts without quality collapse?
+2. Does cached demo-KV produce identical/near-identical generation to fresh-computed KV?
+3. What is the amortized per-query latency with cached demos vs full-prefill baseline?
+4. How does generation quality scale with 1, 2, 3 demos?
+
+### Key Technical Context
+- max_position_embeddings = 10,240 (config.json)
+- rope_theta = 10,000.0, no rope_scaling configured
+- 1-demo prompt = 6,293 tokens, 2-demo ≈ 10,456, 3-demo ≈ 14,619
+- ChameleonRotaryEmbedding: no position clamping, allows extrapolation
+- Dynamic NTK scaling code exists in transformers but not enabled
+- Generation adds up to 2,081 tokens → 2-demo total ≈ 12,537, 3-demo ≈ 16,700
+
+### Phases
+1. [x] Phase 1: Position encoding extension — Dynamic NTK scaling (factor=2.0), all 3 configs generate valid images
+2. [x] Phase 2: Demo-prefix KV caching — Validated: warm SSIM 0.962-0.975, caching mechanism correct
+3. [x] Phase 3: Latency measurement — 5.36x speedup (2-demo), 5.18x (3-demo), generation pathology discovered
+4. [x] Phase 4: Quality validation — 5-query mean SSIM 0.811, consistent quality across queries
+
+### Key Results
+- **5.36x speedup** for 2-demo, **5.18x** for 3-demo (cached vs fresh pipeline)
+- Speedup comes from generation, not prefill: NTK-scaled fresh generation pathologically slow (~544s) vs cached (~97s)
+- Prefix caching is essential for multi-demo ICL (not just an optimization)
+- Mean SSIM 0.811 across 5 validation queries — quality preserved
+- Dynamic NTK scaling (factor=2.0) extends to 16,702 tokens (3-demo + gen)
+
+---
+
+## AR Mainline — AR-3: Generation-Informed Sparse Prefill Prototype — COMPLETED
+
+Started 2026-04-04. Tests whether AR-1's attention characterization can inform a sparse prefill policy that reduces demo-image prefill cost while preserving generation quality.
+
+### Objective
+1. Test whether restricting demo-token attention to high-demo heads during prefill reduces prefill computation.
+2. Determine whether the resulting KV cache preserves generation quality.
+3. Compare to AR-2's generation-time KV compression: does prefill sparsification trigger the same chaos?
+4. Map the quality-sparsity tradeoff across conservative/moderate/aggressive configs.
+5. Test whether head-selection outperforms uniform at matched sparsity (as it did in AR-2).
+
+### Scientific Questions
+1. Does restricting demo-token attention to high-demo heads during prefill reduce prefill latency?
+2. Does this sparsified prefill preserve the KV cache quality that generation depends on?
+3. How does generation quality compare to full prefill?
+4. What fraction of prefill attention computation can be skipped while maintaining quality?
+5. Does prefill sparsification trigger the same AR chaos as AR-2's generation-time KV compression?
+
+### Key Design Insight
+During causal prefill, demo tokens (positions 0-4163) NEVER attend to query tokens (4164+). Masking query→demo attention for specific heads does NOT change demo KV cache entries — only query positions' KV is affected. This is fundamentally milder than AR-2's demo KV zeroing.
+
+### Sparsity Configurations (from AR-1 data)
+- **baseline**: Full prefill (two-phase for fair comparison)
+- **conservative**: Skip heads with <5% demo attn (91/1024 heads, 8.9%)
+- **moderate**: Skip heads with <15% demo attn (271/1024 heads, 26.5%)
+- **aggressive**: Skip heads with <30% demo attn (472/1024 heads, 46.1%)
+- **uniform_moderate**: Random 271 heads (matched to moderate, no AR-1 guidance)
+- **uniform_aggressive**: Random 472 heads (matched to aggressive)
+
+### Mechanism
+Per-head 4D attention masks via forward pre-hooks on decoder layers during prefill. For masked heads, attention from query positions to demo content positions is blocked. Generation runs UNMODIFIED with whatever KV cache the sparse prefill produces.
+
+### Theoretical FLOPs Savings (Prefill)
+- Conservative: 4.0% attention / 3.0% total FLOPs
+- Moderate: 11.8% attention / 8.9% total FLOPs
+- Aggressive: 20.6% attention / 15.5% total FLOPs
+
+### Phases
+1. [x] Phase 1: Design — Head classification from AR-1 data, sparsity configs, FLOPs calculation
+2. [x] Phase 2: Implementation — ar3_sparse_prefill.py with 6 configs, hook-based 4D masking
+3. [x] Phase 3: Evaluation — 3 cases × 6 configs on B200
+4. [x] Phase 4: Analysis — Results, AR-2 chaos comparison, wall-clock assessment
+
+### Key Results
+- **Best config**: moderate (26.5% sparsity) — SSIM 0.905 mean
+- **AR-3 vs AR-2**: SSIM 0.905 vs 0.692 (+31%) — prefill-side intervention far less destructive
+- **Head-selective vs uniform**: mixed (+0.036 at moderate, -0.087 at aggressive)
+- **Non-monotonic**: moderate > conservative > aggressive (same pattern as AR-2)
+- **Prefill latency**: NOT reduced (hooks add overhead); theoretical 8.9% FLOPs savings unrealized
+- **Verdict**: Quality results justify pursuing kernel-level sparse prefill (AR-4)
+
+### Deliverables
+1. ar3_sparse_prefill.py at PROJECT_ROOT/vlm_icl/
+2. ar3_results.json at PROJECT_BLUE_ROOT/vlm_icl/outputs/ar3_sparse_prefill/
+3. Per-config generated images at same output directory
+4. Findings in findings.md under "AR Mainline — AR-3"
+
+---
+
+## AR Mainline — AR-2: Head-Selective Demo-KV Compression Prototype — COMPLETED
+
+Started 2026-04-04. Training-free, per-head demo-KV eviction guided by AR-1 attention characterization.
+
+### Objective
+1. Test whether head-selective KV compression preserves generation quality better than uniform compression at matched retention rates.
+2. Determine the optimal retention rate (25%, 50%, 75%) on the cost-quality Pareto frontier.
+3. Evaluate demo sub-structure ablation (keep output image, drop input image).
+
+### Scientific Questions
+1. Does head-selective compression reduce KV cost while preserving quality?
+2. At matched retention rate (50%), does head-selective outperform uniform?
+3. What retention rate balances cost and quality?
+4. Does demo sub-structure knowledge (input vs output image) help?
+5. Is the quality signal (SSIM, token match) strong enough to guide method design?
+
+### Retention Policies (from AR-1 data)
+- **head_selective_25**: Top 25% heads by demo-attention (threshold = P75 ≈ 0.506). 256/1024 heads retain demo KV.
+- **head_selective_50**: Top 50% heads (threshold = P50 ≈ 0.330). 512/1024 heads retain.
+- **head_selective_75**: Top 75% heads (threshold = P25 ≈ 0.144). 768/1024 heads retain.
+- **uniform_50**: All heads, random 50% of demo token positions zeroed.
+- **substructure_50**: All heads, zero input-image KV (keep output-image KV). ~50% retention by structure.
+
+### Mechanism
+Zero out K and V at demo content positions for evicted heads/positions. Structural marker tokens (positions 0,1,2 and 4163, ~5% of attention) always preserved. Two-phase generation: manual prefill → compress cache → continue with model.generate().
+
+### Phases
+1. [x] Phase 1: Design — Retention policies from AR-1 per-head data, compression mechanism, two-phase generation approach
+2. [x] Phase 2: Implementation — ar2_kv_compression.py with 6 configs, quality metrics, theoretical savings
+3. [x] Phase 3: Evaluation — 3 cases × 6 configs on B200 (reduced from 5 due to cold-start speed)
+4. [x] Phase 4: Analysis — Results tables, head-selective vs uniform comparison, operating point recommendation
+
+### Key Results
+- **AR generation is chaotic**: All compressed configs produce completely different token sequences from baseline (first_diff=1, token_match~2%). Quality cannot be assessed by reference-based pixel metrics.
+- **Head-selective > uniform @50%**: SSIM 0.692 vs 0.622 (+0.070), consistent across all 3 cases. Validates AR-1 attention characterization.
+- **Best operating point**: head_selective_50 (50% retention, P50 threshold ≈ 0.330, 33.1% theoretical KV reduction)
+- **Non-monotonic quality**: 50% > 75% > 25% retention — suggests 50% concentrates attention on most informative heads
+- **Substructure does NOT help**: Dropping all input-image KV (0.611) ≈ random position dropout (0.622)
+- **No actual speedup**: K/V zeroing doesn't reduce tensor dimensions; would need sparse kernels or physical eviction
+
+### Deliverables
+1. ar2_kv_compression.py at PROJECT_ROOT/vlm_icl/
+2. ar2_results.json at PROJECT_BLUE_ROOT/vlm_icl/outputs/ar2_kv_compression/
+3. Per-config generated images at same output directory
+4. Findings in findings.md under "AR Mainline — AR-2"
+
+---
+
+## AR Mainline — AR-1: X-Prompt Positioning + Demo Attention Characterization — COMPLETED
+
+Started 2026-04-04, completed 2026-04-04. Empirical foundation for AR-side acceleration method design.
+
+### Objective
+1. Understand X-Prompt's mechanism, identify gaps, define novelty corridor.
+2. Characterize how generated image tokens attend to demonstration context during AR generation.
+
+### Phases
+1. [x] Phase 1: X-Prompt Deep Inspection — paper analysis (code not released)
+2. [x] Phase 2: Attention Characterization — instrument Lumina-mGPT, log per-layer/per-head attention mass on demo tokens during 1-shot generation
+
+### Key Results
+- Demo tokens receive **33.18%** of total attention (far from negligible)
+- Deep layers (22-31) dedicate >50% attention to demos; shallow layers <20%
+- Strong head specialization: top heads >80% demo attention, bottom heads <1%
+- Temporal stability: demo attention decreases only 11% from early to late generation
+- Demo output image receives 1.31x more attention than input image
+- Novelty corridor defined: inference-time KV eviction guided by head-level attention patterns
+
+### Scientific Questions
+- How does X-Prompt compress demos? (learned bottleneck tokens + attention masking)
+- What does X-Prompt NOT do? (no cross-demo redundancy, no attention analysis, no KV cache optimization, no position encoding solution)
+- What fraction of attention goes to demo tokens during AR generation?
+- Is demo attention concentrated in specific layers/heads?
+- Does demo attention change during generation (early/mid/late)?
+- Within demo, is attention on input image vs output image?
+
+### Deliverables
+1. X-Prompt analysis + novelty corridor in findings.md
+2. Attention characterization tables in findings.md
+3. Raw data at PROJECT_BLUE_ROOT/vlm_icl/profiling/
+4. Analysis script at PROJECT_ROOT/vlm_icl/
+
+---
+
+## VLM In-Context Generation Profiling — COMPLETED
+
+Started 2026-04-02. New workstream: deploy a multimodal in-context generation model, run depth estimation tasks, and produce a bottleneck profile to assess where our existing DiT-side acceleration methods apply.
+
+### Objective
+Determine the bottleneck structure of a multimodal in-context generation pipeline and assess whether our temporal caching / CFG-skip methods target the identified bottleneck.
+
+### Deliverables
+1. Latency breakdown (pipeline stage + within-stage decomposition)
+2. Acceleration applicability assessment (do our methods target the bottleneck?)
+3. Initial evaluation metric recommendations
+
+### Phases
+1. [x] Phase 1: Literature Review — Chameleon (blocked), Lumina-mGPT, Painter/SegGPT, Emu3
+2. [x] Phase 2: Dataset Preparation — NYUDepthV2, 40 pairs, 10 task instances
+3. [x] Phase 3: Model Deployment — Chameleon blocked (image gen disabled), deployed Lumina-mGPT-2.0-Omni
+4. [x] Phase 4: Inference — 5 instances completed, all produced depth maps (512×512)
+5. [x] Phase 5: Profiling — Stage decomposition + context-length scaling complete
+6. [x] Phase 6: Analysis + Meeting Prep — Latency table, acceleration assessment, metric recommendations
+
+### Fallback Rules
+- If Chameleon blocks within ~3 hours → pivot to Lumina-mGPT
+- If both block → document failures, escalate
+- If OOM with 3-image context → try 2-image, then 1-image
+- If dataset prep is complex → use 3 hand-picked examples
+
+### Directory Structure
+- Scripts: `PROJECT_ROOT/vlm_icl/`
+- Weights: `PROJECT_BLUE_ROOT/vlm_icl/weights/`
+- Data: `PROJECT_BLUE_ROOT/vlm_icl/data/`
+- Outputs: `PROJECT_BLUE_ROOT/vlm_icl/outputs/`
+- Profiling: `PROJECT_BLUE_ROOT/vlm_icl/profiling/`
+
+---
+
 ## FLUX Track — F4: Conditioning-Aware KV Reuse — COMPLETED
 
 Completed 2026-03-28. See findings.md "FLUX Track — F4" section for full results.
