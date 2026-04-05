@@ -1,150 +1,124 @@
-# Inference Acceleration for Multi-Image Conditional Editing
+# Inference Acceleration for Visual Language Models
 
-Experimental study of temporal step-caching and CFG reduction for accelerating flow-matching diffusion pipelines used in conditional image editing. Tested on two architecturally distinct models:
+Experimental study of inference acceleration across two model families:
 
-- **Qwen-Image-Edit-2511** (19.5B transformer, true CFG, 40 steps, multi-image)
-- **FLUX.1 Kontext-dev** (12B transformer, guidance-distilled, 28 steps, single-image)
+- **DiT Track** (completed): Temporal step-caching for flow-matching diffusion pipelines (Qwen-Image-Edit, FLUX Kontext-dev)
+- **AR Track** (active): Attention-informed optimization for autoregressive VLM in-context learning (Lumina-mGPT-2.0-Omni)
 
-**Status**: Experimental phase complete (M0-M9 Qwen track, F0-F4 FLUX track). The method is a validated prototype with known quality characteristics, not a deployed system.
+## DiT Track: Temporal Step-Caching (Completed)
 
-## Problem
+**Models**: Qwen-Image-Edit-2511 (19.5B) and FLUX.1 Kontext-dev (12B)
 
-Multi-image conditional editing with flow-matching models is computationally expensive. Qwen-Image-Edit requires 80 transformer passes per image (40 steps x 2 for CFG), taking ~47s on an NVIDIA B200. Kontext-dev requires 28 passes, taking ~9s. Both pipelines concentrate >97% of cost in the denoising loop, with attention dominating at ~75% of block time.
+**Finding**: Both models exhibit a structural temporal plateau during denoising --- consecutive steps produce near-identical noise predictions (cosine similarity > 0.999) for 65-74% of the trajectory. This pattern transfers across architecturally distinct models with different guidance strategies.
 
-## Key Finding: Temporal Plateau Is Structural
+**Method**: During the plateau, reuse the previous step's noise prediction instead of running the transformer. On Qwen, combine with CFG-skip (skip unconditional pass when conditional/unconditional outputs converge).
 
-Both models exhibit an identical three-phase temporal redundancy pattern: convergence, plateau, divergence. During the plateau, consecutive denoising steps produce near-identical noise predictions (cosine similarity > 0.999) for 65-74% of the trajectory.
+| Model | Method | Speedup | Mean SSIM | Notes |
+|---|---|---|---|---|
+| Qwen (19.5B) | Combined (temporal + CFG-skip) | 2.35x | 0.836 (n=18) | Two independent axes |
+| Kontext (12B) | Temporal only | 2.15x | 0.754 (n=12) | Single axis, guidance-distilled |
 
-This pattern is not model-specific --- it appears on architecturally distinct models with different guidance strategies (true CFG vs. guidance-distilled), different step counts (40 vs. 28), and different parameter counts (19.5B vs. 12B). Both models use the FlowMatchEulerDiscreteScheduler, which is a shared confound that cannot be ruled out as a contributing factor with only n=2 models.
+Quality is bimodal: structural/semantic edits are robust (SSIM 0.85-0.99), while fine-detail edits (style transfer, texture) degrade under acceleration (SSIM 0.37-0.80). The same content types are fragile on both models.
 
-![Temporal plateau comparison](docs/plots/temporal_plateau_comparison.png)
+**Mechanistic insight (F4)**: Quality loss comes from stale attention matmuls and FFN computations, not from stale conditioning K/V. Caching only conditioning K/V yields SSIM 0.917 with negligible speedup (1.015x), localizing the quality bottleneck to recomputation decisions above the K/V level.
 
-## Method
+**Status**: Experimental phase complete. Milestones M0-M9 (Qwen), F0-F4 (FLUX).
 
-**Temporal step-caching**: During the plateau, reuse the previous step's complete noise prediction instead of running the transformer. This is a noise-prediction-level cache operating above the transformer --- no architectural modifications required.
+See [docs/results.md](docs/results.md) for full tables. See [docs/examples/](docs/examples/) for curated Qwen comparisons.
 
-**CFG-skip** (Qwen only): During the plateau, skip the unconditional transformer pass. Conditional and unconditional outputs are near-identical (cosine similarity > 0.999) for steps 3-38, making the unconditional pass redundant.
+## AR Track: Autoregressive VLM In-Context Learning (Active)
 
-Qwen's combined schedule (temporal + CFG-skip):
+**Model**: Lumina-mGPT-2.0-Omni (7B, Chameleon architecture, 32 layers, 32 heads)
 
-| Steps | Action | Passes per step |
-|---|---|---|
-| 0-4 | Full compute (conditional + unconditional) | 2 |
-| 5-9 | CFG-skip (conditional only) | 1 |
-| 10-25 | Temporal cache (reuse previous prediction) | 0 |
-| 26-34 | CFG-skip (conditional only) | 1 |
-| 35-39 | Full compute | 2 |
+**Task**: 1-shot depth estimation via in-context learning (NYU Depth V2, 512x512 dual-panel)
 
-Kontext uses temporal caching only (no CFG axis available due to guidance distillation).
+### Bottleneck
 
-## Results
+AR generation dominates the pipeline at 99.4% of total wall-clock time. Adding a single in-context demo image causes catastrophic scaling:
 
-### Cross-Model Comparison
+| Condition | Prompt Tokens | ms/token | Total Time | Slowdown |
+|---|---|---|---|---|
+| 0-shot | 2,129 | 39.9 | 83.0s | 1.00x |
+| 1-shot | 6,293 | 274.5 | 571.2s | **6.88x** |
 
-| Dimension | Qwen (combined, 2.35x) | Kontext (temporal, 2.15x) |
-|---|---|---|
-| Acceleration axes | CFG + temporal | Temporal only |
-| Mean SSIM | 0.836 (n=18) | 0.754 (n=12) |
-| SSIM >= 0.90 | 39% | 33% |
-| SSIM < 0.80 | 33% | 50% |
-| Bimodal distribution | Yes | Yes |
-| Baseline time (1-image) | 26.5s | 8.9s |
-| Accelerated time (1-image) | 11.2s | 4.1s |
+The 3x increase in prompt length produces a 7x increase in wall-clock time due to quadratic prefill scaling and increased per-token generation cost from the larger KV cache.
 
-Qwen achieves higher speedup AND better quality than Kontext because it distributes quality cost across two independent axes. The combined method does not compound quality loss --- observed SSIM (0.836) exceeds predicted-independent SSIM (0.753) because the two axes degrade the same content types.
+### Characterization (AR-1)
 
-Kontext's lower absolute SSIM is explained by three factors: single-axis loading (entire quality cost on temporal caching alone), weaker error correction (milder final-step divergence provides less trajectory correction), and F2's test suite containing proportionally harder cases.
+Per-head attention profiling across all 32x32 = 1,024 attention heads during generation reveals:
 
-![Cross-model speedup](docs/plots/cross_model_speedup.png)
+- 33% of total attention goes to demo-image tokens (range 0.7%-82.1% per head)
+- Strong layer gradient: shallow layers (0-10) attend minimally to demo tokens, deep layers (22-31) attend heavily
+- Head specialization within layers: some heads in the same layer attend 5-80% to demo content
 
-### Quality Distribution
+This characterization informed the design of AR-2 and AR-3.
 
-The quality distribution is bimodal on both models. Content separates into a robust cluster (structural/semantic edits) and a fragile cluster (fine-detail edits):
+### KV Compression and Sparse Prefill (AR-2, AR-3)
 
-**Robust** (SSIM 0.85-0.99): Object placement, portraits, arrangements, simple objects, interior design. Layout and semantic content are established in the early full-compute steps and survive acceleration.
+**AR-2** (generation-time KV compression): Zeroing demo KV entries in low-demo-attention heads. Head-selective compression outperforms uniform at matched sparsity. Best config (moderate, 26.5% heads): SSIM 0.692 vs baseline. The intervention triggers AR generation chaos --- token-level divergence is immediate, but head-selective targeting limits perceptual damage.
 
-**Fragile** (SSIM 0.37-0.80): Style transfer, fine texture, complex scenes, nature detail. These edits depend on mid-trajectory refinement steps that acceleration prunes.
+**AR-3** (prefill-time sparse attention): Masking query-to-demo attention in low-demo heads during prefill. Fundamentally milder than AR-2 because demo KV cache entries are never modified (causal mask ensures demo tokens don't attend to query tokens). Best config (moderate, 26.5% sparsity): SSIM 0.905 --- a +31% improvement over AR-2's equivalent.
 
-The same content types degrade on both models (4/4 fragile types overlap, 4/4 robust types overlap), providing evidence that this quality boundary is a property of the caching method, not model-specific. Difficulty is the strongest predictor: easy cases average SSIM 0.94/0.89 (Qwen/Kontext), medium 0.89/0.83, hard 0.75/0.54. The medium-to-hard drop is 2-4x larger than easy-to-medium.
+Both experiments validate the design principle (attention characterization identifies compressible structure) but achieve no realized wall-clock speedup: prefill is only 0.3% of pipeline cost, and KV compression doesn't reduce per-token generation cost.
 
-![Quality distribution](docs/plots/quality_distribution_comparison.png)
+### Prefix Caching + Position Encoding Extension (AR-4)
 
-![Quality by content type](docs/plots/content_type_comparison.png)
+Extends position encoding via Dynamic NTK scaling (factor=2.0) to support 2-3 demo contexts (up to 16,702 tokens, 1.63x beyond the model's 10,240 max_position_embeddings). Implements demo-prefix KV caching: compute demo KV once, save to disk, reload for each query.
 
-### Mechanistic Insight (F4): Where Quality Loss Comes From
-
-An ablation experiment on Kontext isolated the source of quality degradation. Caching only the conditioning-token K/V projections (text + reference image tokens, 53% of the attention sequence) while recomputing everything else yields SSIM 0.917 with negligible speedup (1.015x). Whole-step temporal caching yields SSIM 0.804 with 2.15x speedup.
-
-The gap (+0.112 SSIM) identifies the quality bottleneck: quality loss comes from stale attention matmuls (Q x K^T, attn x V) and FFN computations, not from stale conditioning K/V. The conditioning tokens change 3-5x less than noise tokens across the plateau and contribute negligibly to output degradation.
-
-This means future improvement should target partial attention recomputation (e.g., recomputing only noise-query attention while reusing condition-query results), not finer-grained K/V caching. Such decomposition would require custom kernels incompatible with FlashAttention.
-
-![F4 ablation](docs/plots/f4_mechanistic_ablation.png)
-
-### Qwen Ablation Summary
-
-| Configuration | Speedup | Mean SSIM | Mean LPIPS |
+| Config | Fresh Pipeline | Cached Pipeline | Observed Speedup |
 |---|---|---|---|
-| CFG-skip only | 1.60x | 0.851 | 0.170 |
-| Temporal cache only | 1.67x | 0.885 | 0.143 |
-| Combined | 2.35x | 0.836 | 0.215 |
+| 1-demo (6,293 tok) | 95.5s | 91.4s | 1.05x |
+| 2-demo (10,457 tok) | 544.9s | 101.6s | **5.36x** |
+| 3-demo (14,621 tok) | 562.2s | 108.5s | **5.18x** |
 
-Temporal caching is the stronger single axis. CFG-skip's primary value is additive speedup when combined (+0.686x additional at -0.049 SSIM cost).
+Prefix caching is essential for multi-demo ICL --- without it, generation time for sequences exceeding max_position_embeddings becomes prohibitive.
 
-## Limitations
+**Mechanism caveat**: The observed 5x speedup for 2-3 demos is under investigation. Preliminary analysis shows the gain comes primarily from generation being ~5.5x faster in the cached pipeline, not from avoiding demo re-prefill (which costs <2s). The fresh pipeline's generation becomes pathologically slow (543-561s for 2,081 tokens) when sequences exceed max_position_embeddings, while the cached pipeline generates at near-1-demo speed (~97-101s). This suggests the speedup partially arises from avoiding a DynamicNTKScaling RoPE recomputation pathology rather than purely from prefill amortization. AR-5 will investigate the root cause.
 
-- **n=2 models**: The temporal plateau transfer claim is based on two models sharing the same scheduler (FlowMatchEulerDiscreteScheduler). Testing on a model with a different flow-matching scheduler would strengthen the structural claim.
-- **Proxy metrics**: SSIM and LPIPS are proxies for perceptual quality. Human evaluation is needed to validate whether measured differences correspond to user-perceived quality.
-- **Fixed schedules only**: The recommended operating points use fixed caching schedules. Content-adaptive routing --- selecting between full and accelerated compute based on edit complexity --- is an open direction.
-- **Test suite size**: 18 cases (Qwen) and 12 cases (Kontext) establish directional findings but are insufficient for statistical significance tests.
-- **Quality ceiling**: Schedule-based acceleration achieves 2.0-2.5x speedup with acceptable quality for structural content. Reaching higher speedup or extending to fine-detail content requires fundamentally different approaches (partial attention recomputation, learned cache policies, or content-adaptive routing).
+Quality between fresh and cached pipelines: mean SSIM 0.811 across 5 validation queries. Token-level divergence is immediate (inherent to AR generation stochasticity), but both pipelines produce valid depth maps.
 
-## Open Directions
-
-1. **Content-adaptive routing**: Use difficulty or content-type signals to select between full compute and accelerated mode at runtime.
-2. **Partial attention recomputation**: Recompute Q x K^T for noise queries while reusing condition-query attention results (requires custom CUDA kernels).
-3. **Third-model validation**: Test on a flow-matching model with a different scheduler to separate method properties from scheduler properties.
-4. **Human evaluation**: Validate whether SSIM-measured quality differences correspond to user-perceived quality.
+**Status**: Active. Mechanism clarification planned (AR-5).
 
 ## Repository Structure
 
 ```
 scripts/
-  qwen/                        # Qwen-Image-Edit track (M0-M9)
-    m1_feasibility.py           # Environment + loading feasibility
-    m3_profile.py               # Three-level denoising profiling
-    m4_redundancy.py            # Temporal + CFG redundancy characterization
-    m5_cfg_skip.py              # CFG-skip prototype (+ v2 variant)
-    m6_temporal_cache.py        # Temporal step-caching prototype
-    m7_multi_image.py           # Multi-image conditioning analysis
-    m8_combined.py              # Combined acceleration prototype
-    m9_validation.py            # 18-case validation + ablation study
-  flux/                        # FLUX Kontext-dev track (F0-F4)
-    architecture_notes.md       # Kontext architecture reference
-    f1_baseline.py              # Baseline + profiling
-    f1_profile.py               # Structured profiling
-    f1_redundancy.py            # Temporal redundancy characterization
-    f1_temporal_cache.py        # Temporal cache transfer test
-    f2_validation.py            # 12-case validation study
-    f2_results.csv              # F2 raw results
-    f4_kv_cache_prototype.py    # Conditioning-aware KV reuse prototype
-    f4_kv_measurement.py        # K/V stability measurement
-  generate_plots.py            # Visualization generation script
+  qwen/                             # Qwen-Image-Edit track (M0-M9)
+    m1_feasibility.py                # Environment + loading
+    m3_profile.py                    # Three-level denoising profiling
+    m4_redundancy.py                 # Temporal + CFG redundancy
+    m5_cfg_skip.py                   # CFG-skip prototype
+    m6_temporal_cache.py             # Temporal step-caching prototype
+    m7_multi_image.py                # Multi-image conditioning analysis
+    m8_combined.py                   # Combined acceleration prototype
+    m9_validation.py                 # 18-case validation + ablation
+  flux/                             # FLUX Kontext-dev track (F0-F4)
+    f1_baseline.py                   # Baseline + profiling
+    f1_redundancy.py                 # Temporal redundancy characterization
+    f1_temporal_cache.py             # Temporal cache transfer test
+    f2_validation.py                 # 12-case validation study
+    f4_kv_cache_prototype.py         # Conditioning-aware KV reuse
+    f4_kv_measurement.py             # K/V stability measurement
+  generate_plots.py                 # DiT track visualization
+vlm_icl/                            # AR track (Lumina-mGPT)
+  run_inference_profiled.py          # Baseline profiling
+  run_context_scaling.py             # Demo-count scaling measurement
+  prepare_nyu_depth.py               # NYU Depth V2 data preparation
+  ar1_attention_characterization.py  # Per-head attention profiling
+  ar2_kv_compression.py              # Generation-time KV compression
+  ar3_sparse_prefill.py              # Prefill-time sparse attention
+  ar4_prefix_cache.py                # Prefix caching + NTK extension
 docs/
-  results.md                   # Full results tables (M9, F2, F3, F4)
-  milestone_summary.md         # One-paragraph summary per milestone
-  plots/                       # Generated visualizations
-  examples/                    # Curated baseline vs. accelerated comparisons (Qwen)
-findings.md                    # Detailed experimental findings and analysis
-progress.md                    # Session-level progress log
-task_plan.md                   # Milestone planning document
-Qwen-Image/                    # Upstream model reference (code only)
+  results.md                        # Full results tables
+  milestone_summary.md              # Per-milestone summaries
+  plots/                            # DiT track visualizations
+  examples/                         # Curated Qwen comparisons
 ```
 
 ## Hardware
 
-All experiments run on NVIDIA B200 (183 GB VRAM). Qwen: 57.76 GB model, 63.20 GB peak. Kontext: 34.4 GB model, 37.5 GB peak. Both loaded in bf16 without quantization or offloading.
+All experiments on NVIDIA B200 (183 GB VRAM). Models loaded in bf16 without quantization.
 
-## Example Outputs (Qwen)
-
-See [docs/examples/](docs/examples/) for curated baseline vs. accelerated comparisons, including both success cases (SSIM > 0.94) and failure cases (SSIM < 0.67). Kontext output images are not included in the repository; quality is characterized numerically in [docs/results.md](docs/results.md).
+- **Qwen**: 57.8 GB model, 63.2 GB peak
+- **Kontext**: 34.4 GB model, 37.5 GB peak
+- **Lumina-mGPT**: 48.7 GB model (0-shot), up to 93.9 GB peak (3-demo cached)

@@ -4,6 +4,69 @@ Full experimental results across both model tracks. For analysis and interpretat
 
 ---
 
+## AR Track: Lumina-mGPT-2.0-Omni
+
+### Baseline Profiling
+
+| Stage | Mean Time (s) | % of Total |
+|---|---|---|
+| Input tokenization | 0.24 | 0.30% |
+| **AR generation** | **80.9** | **99.42%** |
+| VQ-GAN decode | 0.23 | 0.29% |
+| **Total** | **81.4 +/- 3.5** | **100%** |
+
+### Demo-Count Scaling
+
+| Condition | Prompt Tokens | Generated | ms/token | Total (s) | Slowdown |
+|---|---|---|---|---|---|
+| 0-shot | 2,129 | 2,081 | 39.9 | 83.0 | 1.00x |
+| 1-shot | 6,293 | 2,081 | 274.5 | 571.2 | **6.88x** |
+
+### AR-4: Prefix Caching Latency (Fresh vs Cached Pipeline)
+
+#### Fresh Pipeline (full prefill + generation, no caching)
+
+| Config | Prefill | Generation | Total | Peak VRAM |
+|---|---|---|---|---|
+| 1-demo (6,293 tok) | 0.227s | 95.3s | 95.5s | 75.9 GB |
+| 2-demo (10,457 tok) | 1.256s | 543.7s | 544.9s | 77.1 GB |
+| 3-demo (14,621 tok) | 1.431s | 560.8s | 562.2s | 88.0 GB |
+
+#### Cached Pipeline (load demo KV from disk + query-only prefill + generation)
+
+| Config | KV Load | Query Prefill | Generation | Amortized Total | Cache Size |
+|---|---|---|---|---|---|
+| 1-demo | 0.849s | 0.188s | 90.3s | 91.4s | 3,275 MB |
+| 2-demo | 2.626s | 1.651s | 97.3s | 101.6s | 6,549 MB |
+| 3-demo | 5.968s | 1.965s | 100.6s | 108.5s | 9,824 MB |
+
+#### Speedup Summary
+
+| Config | Fresh | Cached | Observed Speedup | Break-even |
+|---|---|---|---|---|
+| 1-demo | 95.5s | 91.4s | 1.05x | 1.0 queries |
+| 2-demo | 544.9s | 101.6s | **5.36x** | immediate |
+| 3-demo | 562.2s | 108.5s | **5.18x** | immediate |
+
+**Note**: The 5x observed speedup for 2-3 demo configs is under investigation. The speedup comes primarily from generation time (543-561s fresh vs 97-101s cached), not from avoiding demo re-prefill. The root cause appears related to a DynamicNTKScaling RoPE recomputation pathology when generation follows a single large prefill exceeding the model's max_position_embeddings (10,240). AR-5 will investigate the mechanism.
+
+### AR-4: Quality Validation (1-demo, 5 queries, shared cached demo)
+
+| Query | SSIM (fresh vs cached) | Token Match | First Diff |
+|---|---|---|---|
+| Q0 | 0.955 | 0.046 | 2 |
+| Q1 | 0.745 | 0.034 | 22 |
+| Q2 | 0.870 | 0.029 | 3 |
+| Q3 | 0.874 | 0.034 | 3 |
+| Q4 | 0.610 | 0.028 | 5 |
+| **Mean** | **0.811** | **0.034** | -- |
+
+SSIM measures divergence between fresh and cached pipelines, not quality degradation. Both pipelines produce valid depth maps. Variance is driven by AR generation stochasticity.
+
+---
+
+## DiT Track: Qwen-Image-Edit + FLUX Kontext-dev
+
 ## M9: Qwen Validation and Ablation (18 cases, combined 2.35x)
 
 ### Ablation Table
