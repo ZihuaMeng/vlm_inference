@@ -1,5 +1,105 @@
 # Progress Log
 
+## 2026-04-09 — AR-5: Speedup Mechanism Decomposition
+
+### Objective
+Decompose the AR-4 speedup to determine how much comes from (a) avoiding a DynamicNTK RoPE recomputation pathology vs (b) genuine prefill amortization.
+
+### Phase 1: RoPE Investigation — COMPLETED
+- Identified root cause: `ChameleonDynamicNTKScalingRotaryEmbedding.forward()` recomputes `inv_freq` on every call when `seq_len > max_position_embeddings`
+- Each call: `torch.max(position_ids)` GPU→CPU sync + `torch.arange().to(device)` tensor creation + `register_buffer()` replacement
+- For 2-demo generation: 32 layers × 2081 steps = 66,592 recomputation calls
+- Implemented fix: pre-compute NTK base frequency at max expected seq_len, replace DynamicNTK with vanilla RoPE using pre-computed inv_freq
+
+### Phase 2: Controlled Experiments — COMPLETED
+
+**2-Demo Decomposition:**
+
+| Config | Gen (s) | s/tok | Total (s) | vs A |
+|--------|---------|-------|-----------|------|
+| A. Original DynamicNTK fresh | 976.9 | 0.4694 | 977.3 | 1.00x |
+| B. Pre-computed NTK fresh | 81.5 | 0.0392 | 81.9 | **11.93x** |
+| C. Cached (original DynamicNTK) | 98.6 | 0.0474 | 100.4 | 9.74x |
+| D. Cached + pre-computed NTK | 80.9 | 0.0389 | 81.1 | 12.04x |
+
+**3-Demo Measurements:**
+- Original DynamicNTK fresh: 561.6s (0.2692 s/tok)
+- Pre-computed NTK fresh: 82.3s (0.0393 s/tok) → **6.83x faster**
+- Cached (original DynamicNTK): 103.8s (0.0490 s/tok) → 5.41x
+
+### Phase 3: Quality Confirmation — COMPLETED
+- 5 queries, SSIM (fresh vs cached, both pre-computed NTK)
+- SSIM: mean=0.7644, min=0.6121, max=0.9222
+- Consistent with AR-4 quality data (AR chaos property — perceptually similar despite token divergence)
+
+### Phase 4: Speedup Attribution — COMPLETED
+- **The entire AR-4 speedup is due to DynamicNTK RoPE recomputation pathology avoidance**
+- RoPE fix alone (A→B): 11.93x — better than caching alone (A→C: 9.74x)
+- Caching adds zero benefit once RoPE is fixed: B (81.9s) ≈ D (81.1s)
+- Honest paper claim: "Prefix caching provides a practical workaround for a DynamicNTK generation pathology"
+
+### Artifacts
+- Script: `vlm_icl/ar5_rope_decomposition.py`
+- Results: `/blue/.../outputs/ar5_decomposition/ar5_results.json`
+- Images: `/blue/.../outputs/ar5_decomposition/exp_{a,b,c,d}_*.png`, `q{0-4}_{fresh,cached}.png`
+
+---
+
+## 2026-04-09 — AR-UND: Understanding Task Generalization of Prefix Caching
+
+### Objective
+Test whether AR-4 prefix caching generalizes to multi-image understanding tasks (text-only output).
+
+### Phase 0: Text Generation Viability — COMPLETED
+- Lumina-mGPT-2.0 does NOT generate coherent text for understanding tasks
+- Model outputs special tokens (`<reserved08799>`, image newline markers) instead of natural language
+- The model is fine-tuned exclusively for image generation
+- Despite non-text output, caching mechanism is task-agnostic — latency measurements remain valid
+
+### Phase 1: Prompt Analysis — COMPLETED
+- Prompt lengths: 1-demo=8,365, 2-demo=12,554, 3-demo=16,743 tokens
+- Query portion is 4,176 tokens (image + question + separator)
+- Demo portion includes image tokens + question text + answer text + separators per demo
+- 2-demo and 3-demo exceed max_position_embeddings (10,240)
+
+### Phase 2: Latency Measurement — COMPLETED
+- **2-demo: 4.60x speedup** (50.3s → 10.9s, cached vs fresh)
+- **3-demo: 1.33x speedup** (36.2s → 27.3s)
+- 1-demo: 1.07x (minimal, inflated by cold-start; warm gen ≈ 4.4s)
+- Per-token generation pathology confirmed: 2-demo fresh=0.244 s/tok vs cached=0.026 s/tok (9.2x)
+- Pathology affects text tokens the same as image tokens — it's a position-encoding issue
+
+### Phase 3: Multi-Query Validation — COMPLETED
+- 5 queries at 1-demo (warm): fresh_gen ≈ cached_gen ≈ 4.4s (no pathology within max_pos_emb)
+- 4/5 exact token match between fresh and cached; 1/5 showed AR chaos divergence
+- Caching mechanism is mathematically correct at 1-demo level
+
+### Phase 4: Cross-Task Comparison — COMPLETED
+- DynamicNTK pathology is universal: affects text output (9.24x at 2-demo) same as image (5.59x)
+- Prefill/total ratio: 2.7–4.0% for text (vs 0.2% for image) — still generation-dominated
+- Caching mechanism is output-modality agnostic
+
+### Key Results
+- **Prefix caching generalizes**: mechanism works identically for non-image tasks
+- **DynamicNTK pathology is universal**: per-token cost inflated for ALL token types at extended positions
+- **Model limitation**: Lumina-mGPT-2.0 cannot do text understanding — true generalization test needs different model
+- **Deliverables**: ar_und_understanding.py, ar_und_results.json, findings.md updated
+
+---
+
+## 2026-04-08 — Home Directory Migration
+
+Heavy artifacts moved from `/home` to `/blue` to resolve quota pressure.
+Symlinks placed at original paths — all relative paths and scripts continue to work.
+
+| Artifact | Original Path | New Location |
+|----------|--------------|--------------|
+| Lumina-mGPT-2.0 repo + checkpoint | `vlm_icl/Lumina-mGPT-2.0/` | `/blue/yuanyuan.lei/zihua.meng/vlm_inference/Lumina-mGPT-2.0/` (symlinked) |
+
+No script changes required — the symlink is transparent to imports and file I/O.
+
+---
+
 ## 2026-04-04 — AR-4: Demo-Prefix Caching + Position Encoding Extension
 
 ### Phase 1: Design & Implementation — COMPLETED

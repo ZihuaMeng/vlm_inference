@@ -1,5 +1,75 @@
 # Task Plan
 
+## AR Mainline — AR-5: Speedup Mechanism Decomposition — COMPLETED
+
+Started 2026-04-09. Decomposes the AR-4 speedup to determine how much comes from (a) avoiding a DynamicNTK RoPE recomputation pathology vs (b) genuine prefill amortization.
+
+### Objective
+1. Identify the root cause of the ~10x generation slowdown in fresh pipelines with DynamicNTK.
+2. Implement a fix (pre-computed NTK) that eliminates per-step RoPE recomputation.
+3. Measure fresh pipeline with the fix and compare to both unfixed fresh and cached baselines.
+4. Produce an honest speedup attribution for paper claims.
+
+### Phases
+1. [x] Phase 1: RoPE investigation — identified `torch.max(position_ids)` GPU→CPU sync + `register_buffer()` on every forward call (32 layers × 2081 steps = 66,592 calls)
+2. [x] Phase 2: Controlled experiments — 4 configs on 2-demo, 3 configs on 3-demo
+3. [x] Phase 3: Quality confirmation — 5 queries, SSIM (fresh vs cached with pre-computed NTK)
+4. [x] Phase 4: Speedup attribution — RoPE pathology is the entire cause
+
+### Key Results — 2-Demo Decomposition Table
+
+| Config | Prefill | Gen | s/tok | Total | vs A |
+|--------|---------|-----|-------|-------|------|
+| A. Original DynamicNTK fresh | 0.382s | 976.9s | 0.4694 | 977.3s | 1.00x |
+| B. Pre-computed NTK fresh | 0.375s | 81.5s | 0.0392 | 81.9s | **11.93x** |
+| C. Cached (original DynamicNTK) | 1.805s | 98.6s | 0.0474 | 100.4s | 9.74x |
+| D. Cached + pre-computed NTK | 0.270s | 80.9s | 0.0389 | 81.1s | 12.04x |
+
+### Attribution
+- **RoPE fix alone (A→B): 11.93x** — eliminates the entire pathology
+- **Caching alone (A→C): 9.74x** — works as a practical workaround
+- **Residual (B vs C): 0.82x** — caching adds NO benefit once RoPE is fixed; B is actually faster than C
+- **B ≈ D**: pre-computed NTK makes fresh ≈ cached (81.9s vs 81.1s)
+
+### Honest Paper Claim
+The AR-4 speedup is entirely due to avoiding a DynamicNTK RoPE recomputation pathology in the transformers library. Prefix caching serves as a practical workaround that circumvents the pathology, not as a prefill amortization mechanism. Pre-computing the NTK base frequency eliminates the pathology directly.
+
+### Deliverables
+1. ar5_rope_decomposition.py at PROJECT_ROOT/vlm_icl/
+2. ar5_results.json at PROJECT_BLUE_ROOT/vlm_icl/outputs/ar5_decomposition/
+3. Findings in findings.md under "AR Mainline — AR-5"
+
+---
+
+## AR Mainline — AR-UND: Understanding Task Generalization — COMPLETED
+
+Started 2026-04-09. Tests whether AR-4's prefix caching mechanism generalizes to multi-image understanding tasks (text-only output).
+
+### Objective
+1. Test if prefix caching produces wall-clock speedup for understanding tasks.
+2. Determine if the DynamicNTK generation pathology affects text output.
+3. Validate that output quality is preserved under prefix caching.
+4. Compare prefill-to-generation cost ratio for text vs image output.
+
+### Phases
+1. [x] Phase 0: Text generation viability — model generates special tokens, not coherent text
+2. [x] Phase 1: Prompt analysis — 8,365 / 12,554 / 16,743 tokens for 1/2/3 demos
+3. [x] Phase 2: Latency measurement — 4.60x speedup at 2-demo, DynamicNTK pathology confirmed
+4. [x] Phase 3: Multi-query validation — 4/5 exact match at 1-demo (warm)
+5. [x] Phase 4: Cross-task comparison — pathology universal, caching generalizes
+
+### Key Results
+- **Prefix caching generalizes** to non-image tasks (mechanism is output-modality agnostic)
+- **DynamicNTK pathology is universal**: 9.24x per-token slowdown at 2-demo for text (vs 5.59x for image)
+- **Model limitation**: Lumina-mGPT-2.0 cannot generate coherent text — true understanding generalization needs a different model
+
+### Deliverables
+1. ar_und_understanding.py at PROJECT_ROOT/vlm_icl/
+2. ar_und_results.json at PROJECT_BLUE_ROOT/vlm_icl/outputs/ar_und/
+3. Findings in findings.md under "AR Mainline — AR-UND"
+
+---
+
 ## AR Mainline — AR-4: Demo-Prefix Caching + Position Encoding Extension — COMPLETED
 
 Started 2026-04-04. Extends position encoding for multi-demo generation and implements demo-prefix KV caching for amortized latency reduction.

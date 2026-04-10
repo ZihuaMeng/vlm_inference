@@ -71,13 +71,30 @@ Extends position encoding via Dynamic NTK scaling (factor=2.0) to support 2-3 de
 | 2-demo (10,457 tok) | 544.9s | 101.6s | **5.36x** |
 | 3-demo (14,621 tok) | 562.2s | 108.5s | **5.18x** |
 
-Prefix caching is essential for multi-demo ICL --- without it, generation time for sequences exceeding max_position_embeddings becomes prohibitive.
-
-**Mechanism caveat**: The observed 5x speedup for 2-3 demos is under investigation. Preliminary analysis shows the gain comes primarily from generation being ~5.5x faster in the cached pipeline, not from avoiding demo re-prefill (which costs <2s). The fresh pipeline's generation becomes pathologically slow (543-561s for 2,081 tokens) when sequences exceed max_position_embeddings, while the cached pipeline generates at near-1-demo speed (~97-101s). This suggests the speedup partially arises from avoiding a DynamicNTKScaling RoPE recomputation pathology rather than purely from prefill amortization. AR-5 will investigate the root cause.
-
 Quality between fresh and cached pipelines: mean SSIM 0.811 across 5 validation queries. Token-level divergence is immediate (inherent to AR generation stochasticity), but both pipelines produce valid depth maps.
 
-**Status**: Active. Mechanism clarification planned (AR-5).
+### Speedup Mechanism Decomposition (AR-5)
+
+The AR-4 5x speedup is **entirely explained by a DynamicNTK RoPE recomputation pathology** in the HuggingFace transformers implementation. `ChameleonDynamicNTKScalingRotaryEmbedding.forward()` recomputes `inv_freq` on every forward call when `seq_len > max_position_embeddings`, incurring a GPU-to-CPU synchronization (`torch.max(position_ids)`) plus tensor reallocation and `register_buffer()` on every step across all 32 layers --- 66,592 unnecessary sync points for a 2-demo generation.
+
+Controlled decomposition on 2-demo (2,081 generated tokens):
+
+| Config | Gen (s) | s/tok | Total | vs Baseline |
+|---|---|---|---|---|
+| A. Original DynamicNTK (fresh) | 976.9 | 0.469 | 977.3s | 1.00x |
+| B. Pre-computed NTK (fresh) | 81.5 | 0.039 | 81.9s | **11.93x** |
+| C. Cached, original DynamicNTK | 98.6 | 0.047 | 100.4s | 9.74x |
+| D. Cached + pre-computed NTK | 80.9 | 0.039 | 81.1s | 12.04x |
+
+Pre-computing `inv_freq` at the expected max sequence length (B) eliminates the pathology entirely, achieving 12x speedup without any caching infrastructure. Caching alone (C) provides a 10x practical workaround. Once the RoPE fix is applied, caching adds no further benefit (B ≈ D). The same pattern holds at 3-demo: pre-computed NTK yields 6.8x vs original DynamicNTK.
+
+The fix is trivial: compute the NTK-adjusted base frequency once at model initialization rather than on every forward call. Prefix caching remains useful operationally (warm-start for interactive workflows) but cannot be claimed as a latency optimization for this architecture.
+
+### Understanding Task Generalization (AR-UND)
+
+Tested whether prefix caching generalizes to multi-image understanding tasks with text-only output. The caching mechanism is output-modality agnostic: the DynamicNTK pathology and caching workaround affect all token types equally. However, Lumina-mGPT-2.0 cannot generate coherent text for understanding tasks --- it produces image-mode special tokens regardless of prompt structure. True understanding-task validation requires a model fine-tuned for text generation.
+
+**Status**: Mechanism resolved on Lumina-mGPT-2.0. Chameleon bring-up pending for generalization.
 
 ## Repository Structure
 
@@ -108,6 +125,8 @@ vlm_icl/                            # AR track (Lumina-mGPT)
   ar2_kv_compression.py              # Generation-time KV compression
   ar3_sparse_prefill.py              # Prefill-time sparse attention
   ar4_prefix_cache.py                # Prefix caching + NTK extension
+  ar5_rope_decomposition.py          # Speedup mechanism decomposition
+  ar_und_understanding.py            # Understanding task generalization
 docs/
   results.md                        # Full results tables
   milestone_summary.md              # Per-milestone summaries

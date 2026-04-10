@@ -1,9 +1,12 @@
 # ── Upstream clones ───────────────────────────────────────
 Qwen-Image/
 vlm_icl/Lumina-mGPT-2.0/
+vlm_icl/Lumina-mGPT-2.0
 
 # ── Model weights & large artifacts ──────────────────────
 weights/
+cache/
+profiling/
 *.safetensors
 *.bin
 *.ckpt
@@ -48,7 +51,7 @@ task_plan.md
 progress.md
 findings.md
 
-# ── Claude Code ──────────────────────────────────────────
+# ── Tool config ──────────────────────────────────────────
 .claude/
 
 # ── OS / editor ──────────────────────────────────────────
