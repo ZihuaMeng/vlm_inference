@@ -4,6 +4,14 @@ Experimental study of inference acceleration across two model families:
 
 - **DiT Track** (completed): Temporal step-caching for flow-matching diffusion pipelines (Qwen-Image-Edit, FLUX Kontext-dev)
 - **AR Track** (active): Attention-informed optimization for autoregressive VLM in-context learning (Lumina-mGPT-2.0-Omni)
+- **Phase A — Emu3 / understanding-regime probe** (frozen): Emu3-Chat understanding-regime anchor validated; generation-regime (D-2a) currently in PI branch re-judgment after a window-clean negative checkpoint.
+
+## Current project state
+
+For the current branch-state summary (AR-6 frozen; D-1 Emu3 understanding frozen as the clean control baseline; D-2a generation in PI branch re-judgment after a window-clean negative checkpoint; second-model preparation as the upcoming path), see [`docs/current_project_state.md`](docs/current_project_state.md). Experiment tables for the completed tracks remain in [`docs/results.md`](docs/results.md) and [`docs/milestone_summary.md`](docs/milestone_summary.md); repo-hygiene context is in [`docs/storage_and_archive_notes.md`](docs/storage_and_archive_notes.md).
+
+D-2a result wording is intentionally conservative and configuration-bound: on the tested zero-shot prompt shape and current colorization scaffold, the within-window re-probe remained Gate-B fail; this removes the Stage-2 context-overflow confound for this configuration. No Emu3-Gen-wide or Emu3-family-wide inability is claimed.
+
 
 ## DiT Track: Temporal Step-Caching (Completed)
 
@@ -127,12 +135,21 @@ vlm_icl/                            # AR track (Lumina-mGPT)
   ar4_prefix_cache.py                # Prefix caching + NTK extension
   ar5_rope_decomposition.py          # Speedup mechanism decomposition
   ar_und_understanding.py            # Understanding task generalization
+  emu3_a1_probe.py                   # Phase A A-1 Emu3-Chat deployment audit
+  emu3_a2_gqa_scaling.py             # Phase A A-2 GQA-scaling sweep
+  emu3_a3a_mibench_scaling.py        # Phase A A-3a MIBench scaling sweep
+  d1_anchor_validation.py            # D-1 Emu3 understanding-freeze anchor validation
+  d2a_capability_runner.py           # D-2a Emu3 generation-capability runner (active)
 docs/
-  results.md                        # Full results tables
+  current_project_state.md          # Current branch state (tracked)
+  storage_and_archive_notes.md      # Repo hygiene and archive policy (tracked)
+  results.md                        # Full DiT/AR results tables
   milestone_summary.md              # Per-milestone summaries
   plots/                            # DiT track visualizations
   examples/                         # Curated Qwen comparisons
 ```
+
+Raw evidence, recon notes, and planning state are held locally in the working tree and are not part of git history by convention. See [`docs/storage_and_archive_notes.md`](docs/storage_and_archive_notes.md) for the tracked-vs-local map.
 
 ## Hardware
 

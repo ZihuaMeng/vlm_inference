@@ -65,3 +65,15 @@ Thumbs.db
 
 # ── Symlinks to blue drive ───────────────────────────────
 # (exclude any symlinks pointing outside the repo)
+
+# ── Archive / cleanup artifacts ──────────────────────────
+archive/
+deliverables/repo_refresh_cleanup/
+
+# ── Codex sentinel ───────────────────────────────────────
+.codex
+
+# ── Editor/VCS temp ──────────────────────────────────────
+*.orig
+*.rej
+.merge_file_*
