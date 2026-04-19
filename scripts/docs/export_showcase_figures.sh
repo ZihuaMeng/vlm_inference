@@ -42,6 +42,21 @@ copy_if_present "${src_dit}/cross_model_speedup.png"         "${dst}/02_dit_cros
 copy_if_present "${src_d1}/fig1_prefill_vs_tokens.png"       "${dst}/03_emu3_prefill_scaling.png"
 copy_if_present "${src_d1}/fig6_prefill_gen_ratio.png"       "${dst}/04_emu3_prefill_gen_ratio.png"
 
+# Janus-Pro SM-2 matched-k inversion figure. This one is rendered fresh from
+# the accepted V4 auxiliary pooled means (no new measurement); the renderer
+# lives alongside this script so rerun is self-contained. Requires matplotlib
+# + numpy in the invoking Python.
+python_bin="${PYTHON_BIN:-python3}"
+if ! command -v "${python_bin}" >/dev/null 2>&1; then
+  echo "WARN: python_bin '${python_bin}' not found; skipping SM-2 figure" >&2
+else
+  if "${python_bin}" -c "import matplotlib, numpy" >/dev/null 2>&1; then
+    "${python_bin}" "${here}/sm2_matched_k_inversion_figure.py"
+  else
+    echo "WARN: matplotlib/numpy not importable under ${python_bin}; skipping SM-2 figure" >&2
+  fi
+fi
+
 echo
 echo "docs/figures/ is now:"
 ls -la "${dst}"
