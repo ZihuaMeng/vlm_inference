@@ -25,6 +25,9 @@
 | DiT/AR experiment tables | `docs/results.md`, `docs/milestone_summary.md` | — |
 | D-1 report | — | `deliverables/d1_emu3_understanding_freeze/d1_report.md` |
 | D-2a stage checkpoints | — | `deliverables/d2a_generation_capability/stage{2,2a}_checkpoint.md` |
+| SM-1 report + raw + samples | — | `deliverables/sm1_janus_pro_pilot/` |
+| SM-2 report + raw + V4 matched tables | — | `deliverables/sm2_janus_pro_round2/` |
+| SM-3 continuity-gate checkpoints (paused) | — | `deliverables/sm3_janus_pro_round3/` |
 | Recon notes and Codex audits | — | `recon/` |
 | Phase R0 full manifest | — | `deliverables/repo_refresh_cleanup/cleanup_manifest.md` |
 | Blue-drive prune shortlist | — | `deliverables/repo_refresh_cleanup/blue_prune_execution_shortlist.md` |

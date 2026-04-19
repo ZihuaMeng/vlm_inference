@@ -20,7 +20,9 @@ quantization.
 | AR-6 / SAICL prototype | Lumina-mGPT-2.0-Omni | Structured demo-attention + reversed-pyramid layer retention (prototype) | **Frozen** — not mainline |
 | Phase A / D-1 | Emu3-Chat (understanding regime) | Anchor validation passed, prefill/generation scaling law characterized (n=135, 4.5k–96.8k tokens, O(n^1.18)) | **Frozen** as clean control baseline |
 | D-2a (bounded branch) | Emu3-Gen (generation regime) | Stage-2 (35% over-window) and Stage-2A (within-window) colorization probes on the tested zero-shot prompt shape | **In PI branch re-judgment** after a window-clean negative checkpoint |
-| Second-model preparation | TBD | Reconnaissance pending | **Upcoming**, not started |
+| SM-1 (second-model discrimination pilot) | Janus-Pro 7B | Bottleneck-shape contrast vs Emu3 D-1 baseline; generation-dominant at k=0/1 (prefill/gen ≈ 0.12 / 0.14) | **Completed** as bounded Round-1 pilot |
+| SM-2 (bottleneck-shape verification) | Janus-Pro 7B | 36-measurement token-matched sample at k ∈ {0,1,2,3}; 36/36 dominance-inversion against nearest Emu3 A-2 | **Completed** (low-token understanding-side verification) |
+| SM-3 (token-overlap gap-closure) | Janus-Pro 7B | k ∈ {4,5,6,7} ladder intended to produce a token-overlap match with Emu3 A-2 | **Paused at continuity gate, unresolved** — not a branch closure, not a final scientific negative |
 
 For the configuration-bound current state, see
 [`docs/current_project_state.md`](docs/current_project_state.md). Full DiT/AR
@@ -49,7 +51,7 @@ shift to a pain-first diagnostic program on a different model family.
 
 ## Project evolution: from method-first to pain-first
 
-The project ran in three overlapping phases:
+The project ran in four overlapping phases:
 
 1. **Method-first (DiT track, completed).** Profile a flow-matching pipeline,
    identify a structural redundancy (temporal step similarity at cos > 0.999
@@ -83,12 +85,23 @@ The project ran in three overlapping phases:
    specific confound (Stage-2 context-window overflow) before any broader
    generative methodology is considered.
 
+4. **Cross-family discrimination (Janus-Pro track, current).** Port the
+   bottleneck-shape question to a second model family under bounded packets.
+   SM-1 establishes that Janus-Pro inverts the Emu3 dominance structure on
+   matched understanding (generation-dominant at k=0/1, prefill-dominant on
+   Emu3), attributable to image-tokenization budget rather than architecture
+   proper. SM-2 verifies this direction-stability on a 36-measurement
+   token-matched sample across k ∈ {0,1,2,3}. SM-3 attempted to close the
+   token-overlap gap (walk Janus up to k ∈ {4,5,6,7}) but is paused at the
+   per-query continuity gate; it is unresolved, not a branch closure.
+
 ## Visual summary
 
-Four figures drawn from the frozen-result surface. All four are the
-presentation-level visuals referenced by the narrative above; the underlying
-numeric tables live in `docs/results.md` (DiT/AR) and in the local D-1
-deliverable tree (Emu3).
+Five figures drawn from the frozen / bounded-complete result surface across
+the three tracks (DiT, Emu3, Janus-Pro). All five are the presentation-level
+visuals referenced by the narrative above; the underlying numeric tables
+live in `docs/results.md` (DiT/AR), in the local D-1 deliverable tree (Emu3),
+and in the local SM-2 deliverable tree (Janus-Pro).
 
 ### DiT track — the temporal plateau that both flow-matching models share
 
@@ -136,6 +149,23 @@ hits 20.7×. On Emu3-Chat's understanding workload with short answers,
 serves as the clean control baseline the D-2a generation audit and any
 future second-model method must improve against.
 
+### Janus-Pro vs. Emu3-Chat — matched-k dominance inversion (SM-2)
+
+![SM-2 matched-k dominance inversion, k = 0..3](docs/figures/05_sm2_matched_k_inversion.png)
+
+On the same ICL task (GQA-testdev single-image, k ∈ {0, 1, 2, 3}, bf16,
+B200, greedy decoding), two VLMs sit on opposite sides of the prefill/gen
+crossover line. Emu3-Chat (A-2; VQ ≈ 4,000 tokens/image) runs
+prefill-dominant from 5.94× at k=0 to 14.53× at k=3. Janus-Pro
+(SigLIP-L ≈ 576 tokens/image) stays generation-dominant from 0.072× at k=0
+to 0.207× at k=3. The direction does not reverse on any of the four
+k-levels. Attribution: image-tokenization budget — a ~7× shorter per-image
+token footprint collapses Janus-Pro's prefill cost while leaving per-token
+decode unchanged. This is the cross-family bottleneck-shape discrimination
+the SM-2 packet was designed to verify; the 36-measurement token-matched
+primary verdict (36 / 36 `dominance_inversion = yes`) is in
+[`docs/results.md`](docs/results.md).
+
 ## Current scientific state
 
 ### D-1 — Emu3-Chat understanding-regime anchor (frozen)
@@ -173,10 +203,81 @@ decode path (DynamicCache grow-cat + SDPA on q_len=1); a `StaticCache` +
 
 The branch has entered PI re-judgment. No active execution in this repo pass.
 
-### Second-model preparation (upcoming)
+### SM-1 — Janus-Pro bounded second-model pilot (completed)
 
-Second-model reconnaissance is the next preparation path once PI branch
-re-judgment on D-2a resolves. No second-model execution has started.
+A bounded Round-1 pilot on Janus-Pro 7B (`deepseek-ai/Janus-Pro-7B`, pinned
+revision `5c3eb3fb…`, fresh isolated venv, bf16 on B200, mandatory CodeX audit
+cleared). Packet scope: bottleneck-shape characterization + capability sanity on
+one model. Not a scaling study, not a method experiment.
+
+The primary scientific output is the **dominance-structure contrast against
+the Emu3-Chat D-1 baseline**. At matched understanding k ∈ {0, 1}:
+
+| regime | Emu3-Chat (D-1) | Janus-Pro (SM-1 R2) |
+|---|---|---|
+| k=0 prefill/gen | **5.94×** (prefill dominates) | **0.115×** (generation dominates) |
+| k=1 prefill/gen | **9.58×** (prefill dominates) | **0.141×** (generation dominates) |
+
+Attribution: Janus-Pro's SigLIP-L vision tower uses ~576 LM positions per
+image; Emu3-Chat's VQ tokenizer uses ~4,000 LM positions per image. The
+~7× shorter prompt collapses prefill cost on Janus while leaving per-token
+decode cost unchanged — generation naturally dominates on Janus, prefill on
+Emu3. This shifts where the wall-clock lives without changing per-family
+internal ordering.
+
+SM-1 R3.1 (trivial text-to-image) was `usable` on its Gate B rubric; R3.2
+(k=0 colorization) was `clearly_unusable` **strictly configuration-bound** to
+the tested zero-shot prompt shape and the current colorization scaffold. This
+is not a Janus-Pro-wide or family-wide inability claim.
+
+### SM-2 — Janus-Pro Round 2: low-token understanding-side bottleneck-shape verification (completed)
+
+A bounded Round-2 packet with two PI overrides (V1 continuity as ±20% mean
+band on 1 warmup + 2 timed; V4 token-matched cross-family comparison as
+primary verdict basis, matched-k auxiliary as appendix only). Mandatory
+CodeX audit cleared 14/14 items. V1 continuity absorbed a cross-host/device
+change (`c1003a-s5.ufhpc` GPU1 → `c1006a-s5.ufhpc` GPU0) within band.
+
+On a **36-measurement token-matched sample at 4 k-levels** (k ∈ {0, 1, 2, 3},
+3 queries × 3 timed runs per cell): **36 / 36 pairings show
+`dominance_inversion = yes`** against the nearest-prompt-token Emu3 A-2 point.
+The matched-k appendix extends the SM-1 k=0 / k=1 inversion to k=2 and k=3
+at the same direction:
+
+![SM-2 matched-k dominance inversion, k = 0..3](docs/figures/05_sm2_matched_k_inversion.png)
+
+| k | Janus prefill/gen | Emu3 prefill/gen | Janus ptok | Emu3 ptok | inversion |
+|---|---|---|---|---|---|
+| 0 | 0.072 | 5.94 | 635 | 4,479 | yes |
+| 1 | 0.137 | 9.58 | 1,233 | 8,691 | yes |
+| 2 | 0.140 | **11.70** | 1,845 | 13,595 | yes |
+| 3 | 0.207 | **14.53** | 2,443 | 18,492 | yes |
+
+**Owned limitation (SM-2 V4 LARGE_GAP).** All Janus-Pro prompt tokens at
+k=0..3 (~635–2443) fall below Emu3 A-2's smallest prompt (~4,242 tok at k=0),
+so every token-matched pair is anchored at Emu3 k=0. The SM-2 verdict is
+carried by direction-invariance on both sides of the pairing, not by
+raw-number equivalence. This is the precise gap that SM-3 was designed to
+close.
+
+### SM-3 — Janus-Pro Round 3: token-overlap gap-closure attempt (paused at continuity gate, unresolved)
+
+**Status: paused at the per-query continuity gate. Unresolved. Not a branch
+closure. Not a final scientific negative.**
+
+SM-3 is the bounded follow-on packet intended to close SM-2 V4's
+`LARGE_GAP` limitation by walking Janus-Pro up the ICL ladder to
+k ∈ {4, 5, 6, 7}, so that at least one cell produces a token-overlap match
+with Emu3 A-2. The CodeX audit on the code cleared, and a PI-authorized
+narrow delta audit additionally cleared the remediation code change.
+
+The packet did not proceed past G1, the per-query continuity gate against
+the SM-2 V2.k0 reference for the same query. No downstream SM-3 cells (G2
+k-ladder, G3 token-overlap analysis) were executed; **no SM-3 scientific
+claim is on record**. SM-3 is not treated as scientifically resolved in this
+pass, and no further engineer-side continuity patching is being performed.
+
+The SM-1 and SM-2 results above are unaffected by the SM-3 pause.
 
 ## DiT track: detail
 
@@ -277,11 +378,11 @@ generation-capability decision and is not re-opened in this pass.
 ```
 README.md                         # this file
 docs/
-  current_project_state.md          # configuration-bound branch state (D-1, D-2a, ...)
+  current_project_state.md          # configuration-bound branch state (D-1, D-2a, SM-*)
   storage_and_archive_notes.md      # what Phase R0 did / did not do; tracked-vs-local map
-  results.md                        # full DiT/AR experiment tables
-  milestone_summary.md              # per-milestone narratives
-  figures/                          # the four README visuals (see above)
+  results.md                        # full DiT/AR + Janus-Pro SM-1/SM-2 tables
+  milestone_summary.md              # per-milestone narratives (M0–M9, F0–F4, SM-1..3)
+  figures/                          # the five README visuals (see Visual summary above)
   plots/                            # richer DiT/AR plot set
   examples/                         # curated Qwen before/after comparisons
 scripts/
@@ -289,23 +390,33 @@ scripts/
   flux/                             # FLUX Kontext-dev track (F0–F4)
   generate_plots.py                 # DiT-track plot regenerator
   docs/
-    export_showcase_figures.sh      # re-copy the four README figures from source
-vlm_icl/                            # AR track + Phase A / D-1 / D-2a scripts
+    export_showcase_figures.sh      # re-export README figures from source
+    sm2_matched_k_inversion_figure.py # SM-2 matched-k inversion renderer (pinned V4 data)
+vlm_icl/                            # AR (Lumina) + Phase A track — DiT-era experiment code
   run_inference_profiled.py, run_context_scaling.py, prepare_nyu_depth.py
   ar1_attention_characterization.py ... ar5_rope_decomposition.py
   ar_und_understanding.py
-  emu3_a1_probe.py, emu3_a2_gqa_scaling.py, emu3_a3a_mibench_scaling.py
-  d1_anchor_validation.py, d2a_capability_runner.py
 .gitignore
 ```
+
+The Emu3 (D-1 / D-2a), Janus-Pro (SM-1 / SM-2 / SM-3), and AR-6 / SAICL
+experiment runners live in `vlm_icl/` as **untracked** working-tree files
+by existing project policy (they depend on the local `deliverables/` tree
+for inputs and outputs). They are listed in the local column below.
 
 **Local-only (not part of git history by convention):**
 
 | Topic | Location |
 |---|---|
 | Planning / control plane | `task_plan.md`, `progress.md`, `findings.md` |
+| Emu3 D-1 / D-2a experiment scripts | `vlm_icl/emu3_a1_*.py`, `vlm_icl/emu3_a2_*.py`, `vlm_icl/emu3_a3a_*.py`, `vlm_icl/d1_anchor_validation.py`, `vlm_icl/d2a_capability_runner.py` |
+| Janus-Pro SM-1 / SM-2 / SM-3 experiment scripts | `vlm_icl/sm1_*.py`, `vlm_icl/sm2_*.py`, `vlm_icl/sm3_*.py` |
+| AR-6 / SAICL prototype scripts | `vlm_icl/ar6_*.py` |
 | D-1 evidence tree (report, raw, figures) | `deliverables/d1_emu3_understanding_freeze/` |
 | D-2a stage checkpoints, samples, logs | `deliverables/d2a_generation_capability/` |
+| SM-1 report + raw + samples + Codex audit | `deliverables/sm1_janus_pro_pilot/` |
+| SM-2 report + raw + V4 matched tables + Codex audit | `deliverables/sm2_janus_pro_round2/` |
+| SM-3 checkpoints (continuity gate, paused) + Codex audit | `deliverables/sm3_janus_pro_round3/` |
 | Recon notes and Codex audits | `recon/` |
 | Historical logs, superseded inventories | `archive/` |
 | Phase R0 manifest + blue-prune notes | `deliverables/repo_refresh_cleanup/` |

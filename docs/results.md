@@ -269,4 +269,52 @@ KV caching wins in all 8/8 cases. The quality advantage is largest on fragile co
 | Attention matmul | Fresh | Stale |
 | FFN | Fresh | Stale |
 
+---
+
+## Janus-Pro Track: SM-1 / SM-2 (Understanding-Side Bottleneck-Shape Discrimination)
+
+### SM-1 R2 — Janus-Pro Understanding Cells (k=0, k=1, pooled)
+
+| cell | k | prompt_tok | new_tok | prefill_ms | generation_s | decode_ms/tok | peak_vram_mb | prefill/gen |
+|---|---|---|---|---|---|---|---|---|
+| R2.1 | 0 | 629.5 | 15 | 24.46 | 0.212 | 15.51 | 14,527 | 0.115 |
+| R2.2 | 1 | 1,239.5 | 17 | 28.74 | 0.204 | 12.78 | 14,874 | 0.141 |
+
+### SM-1 R3 — Janus-Pro Generation Cells (single sample per cell)
+
+| cell | prompt_tok | img_tok | generation_s | decode_ms/tok | chromaticity | Gate A | Gate B (PI-final) |
+|---|---|---|---|---|---|---|---|
+| R3.1 (trivial T2I) | 15 | 576 | 161.886 | 281.54 | 46.21 | PASS | `usable` |
+| R3.2 (k=0 colorization) | 46 | 576 | 161.722 | 281.26 | 1.21 | PASS | `clearly_unusable` (config-bound) |
+
+R3.2 is strictly bounded to the tested zero-shot prompt shape and the current colorization scaffold; it is **not** a Janus-Pro-wide or family-wide inability claim.
+
+### SM-2 V2/V3 — Pooled Cells Across the k-Ladder (Janus-Pro, 3 queries × 3 timed per cell)
+
+| cell | k | prompt_tok (mean) | prefill_ms (CV) | generation_ms (pooled) | decode_ms/tok | peak_vram_mb | prefill/gen |
+|---|---|---|---|---|---|---|---|
+| v2.k0 | 0 | 635 | 16.22 (0.75%) | 226.69 | 9.36 | 14,530 | 0.072 |
+| v2.k1 | 1 | 1,233 | 23.51 (0.69%) | 171.64 | 10.10 | 14,870 | 0.137 |
+| v3.k2 | 2 | 1,845 | 30.97 (0.56%) | 221.90 | 10.14 | 15,214 | 0.140 |
+| v3.k3 | 3 | 2,443 | 39.51 (0.28%) | 190.94 | 10.12 | 15,557 | 0.207 |
+
+Per-query CV on prefill_s, generation_s, total_s passed the < 10% gate on all four cells.
+
+### SM-2 V4 — Matched-k Cross-Family Dominance Inversion (APPENDIX of PRIMARY verdict)
+
+Pooled per-family means at same k. The PRIMARY SM-2 verdict is the 36-row token-matched table, available machine-readable at `deliverables/sm2_janus_pro_round2/discrimination_snapshot_round2.csv` (scope=`primary_token_matched`).
+
+| k | Janus prefill_ms | Janus gen_ms | **Janus ratio** | Emu3 prefill_ms | Emu3 gen_ms | **Emu3 ratio** | j_ptok | e_ptok | inversion |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | 16.22 | 226.69 | **0.072** | 100.34 | 16.89 | **5.94** | 635 | 4,479 | yes |
+| 1 | 23.51 | 171.64 | **0.137** | 208.47 | 21.75 | **9.58** | 1,233 | 8,691 | yes |
+| 2 | 30.97 | 221.90 | **0.140** | 334.37 | 28.58 | **11.70** | 1,845 | 13,595 | yes |
+| 3 | 39.51 | 190.94 | **0.207** | 474.19 | 32.65 | **14.53** | 2,443 | 18,492 | yes |
+
+**V4 LARGE_GAP limitation (owned).** All Janus-Pro prompt-token counts at k=0..3 fall below Emu3 A-2's smallest prompt (4,242 tok at k=0), so every token-matched pair is anchored at Emu3 k=0. The V4 primary verdict rests on direction-invariance of `prefill/gen` on both sides of the pairing (Janus always << 1, Emu3 always >> 1) at the tested k-range — not on raw-number equivalence at matched tokens.
+
+### SM-3 — Token-Overlap Gap-Closure Attempt (paused at continuity gate, unresolved)
+
+SM-3 was designed to close the SM-2 LARGE_GAP limitation by walking Janus-Pro up to k ∈ {4, 5, 6, 7}. The packet did not proceed past the per-query continuity gate against the SM-2 V2.k0 reference; no SM-3 scientific claim is on record. SM-3 is paused, not closed. SM-1 and SM-2 results above are unaffected.
+
 The +0.112 SSIM gap identifies the quality bottleneck: quality loss comes from stale attention matmuls and FFN, not from stale condition K/V. Condition-token K/V staleness contributes negligibly to degradation.

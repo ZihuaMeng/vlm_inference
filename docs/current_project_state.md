@@ -37,9 +37,39 @@ Current evidence (all configuration-bound to k=0, q=1, current ICL prompt shape,
 
 **What is not claimed**: no Emu3-Gen-wide inability; no Emu3-family-wide inability; no claim about untested k, untested scaffolds, untested prompt shapes, or untested decode paths. Gate C is substrate-bound at the current decode path (DynamicCache grow-cat + SDPA on q_len=1) and a `StaticCache` + `torch.compile` path remains outside D-2a scope.
 
-### Second-model preparation
+### SM-1 — Janus-Pro bounded second-model pilot (Round 1)
 
-**Upcoming, not yet active.** Second-model reconnaissance is the next preparation path once PI branch re-judgment on D-2a resolves. No second-model execution has started in this pass.
+**Completed 2026-04-18 as a bounded discrimination pilot.** Janus-Pro 7B (`deepseek-ai/Janus-Pro-7B`, pinned revision `5c3eb3fb…`), fresh isolated venv, bf16 on B200, mandatory CodeX audit cleared (two passes). Packet scope: bottleneck-shape characterization + capability sanity on one model. Not a scaling study, not a method experiment.
+
+The primary scientific output is the **dominance-structure contrast against the Emu3-Chat D-1 baseline**: at matched understanding k ∈ {0, 1}, Janus-Pro is generation-dominant (prefill/gen ≈ 0.12 / 0.14) while Emu3-Chat at the same k is prefill-dominant (prefill/gen ≈ 5.94 / 9.58). The contrast is attributable to image-tokenization budget (Janus-Pro's SigLIP-L uses ~576 LM positions per image vs Emu3's ~4,000 VQ positions), which shifts where the wall-clock lives without changing per-family internal ordering.
+
+R3.1 (trivial T2I) passed Gate B (`usable`); R3.2 (k=0 colorization) returned Gate B `clearly_unusable` **strictly configuration-bound** to the tested zero-shot prompt shape and the current colorization scaffold. This is not a Janus-Pro-wide or family-wide inability claim.
+
+SM-1 evidence lives under the local `deliverables/sm1_janus_pro_pilot/` tree.
+
+### SM-2 — Janus-Pro Round 2: low-token understanding-side bottleneck-shape verification
+
+**Completed 2026-04-18.** Bounded Round-2 packet with two PI overrides (V1 continuity as ±20% mean band on 1 warmup + 2 timed; V4 token-matched cross-family comparison as primary verdict basis, matched-k as appendix only). CodeX audit cleared 14/14 items. V1 continuity absorbed a cross-host/device change (`c1003a-s5.ufhpc` GPU1 → `c1006a-s5.ufhpc` GPU0) within band.
+
+On a **36-measurement token-matched sample at 4 k-levels** (k ∈ {0, 1, 2, 3}, 3 queries × 3 timed runs per cell), 36 / 36 pairings show `dominance_inversion = yes` against the nearest-prompt-token Emu3 A-2 point — i.e. the SM-1 bottleneck-shape contrast is direction-stable on Janus at every rung of the tested k-ladder. The matched-k appendix extends SM-1's k=0 / k=1 inversion to k=2 and k=3 (Emu3 ratio 11.70, 14.53; Janus 0.140, 0.207).
+
+**Owned limitation**: all Janus-Pro prompt tokens at k=0..3 (~635–2443) fall below Emu3 A-2's smallest prompt (~4242 tok @ k=0), so every token-matched pair is anchored at Emu3 k=0. The science is carried by direction-invariance on both sides of the pairing, not by raw-number equivalence. This is the precise gap SM-3 was designed to close.
+
+**Scope bounds**: verification is bounded to GQA-testdev-balanced single-image queries at k ∈ {0,1,2,3}, prompt_tokens 629–2470, batch 1, bf16, B200, greedy decoding with `max_new_tokens=32`. Different datasets, batch sizes, decoding regimes, or token budgets may alter the numeric ratio; no family-wide extrapolation is made. SM-1 R3.2 configuration-bound `clearly_unusable` is not revisited.
+
+SM-2 evidence lives under the local `deliverables/sm2_janus_pro_round2/` tree.
+
+### SM-3 — Janus-Pro Round 3: token-overlap gap-closure attempt (paused at continuity gate, unresolved)
+
+**Status: paused at the continuity gate. Unresolved. Not a branch closure. Not a final scientific negative.**
+
+SM-3 was the bounded follow-on packet intended to close SM-2 V4's `LARGE_GAP` limitation by walking Janus-Pro up to k ∈ {4, 5, 6, 7} so that at least one cell produces a token-overlap match with Emu3 A-2. The CodeX audit cleared the code (26/26 items), and a PI-authorized narrow remediation rerun additionally cleared the code delta (GO-WITH-FLAG, one cosmetic minor).
+
+The packet did not proceed past the per-query continuity gate (G1) against the SM-2 V2.k0 reference for the same query (qid 201640614). No downstream SM-3 cells (G2 k-ladder, G3 token-overlap analysis) were executed; no SM-3 scientific claim is on record. SM-3 is **not** treated as scientifically resolved in this pass, and no further engineer-side continuity patching is being performed.
+
+The SM-1 and SM-2 results above are unaffected by the SM-3 pause.
+
+SM-3 evidence lives under the local `deliverables/sm3_janus_pro_round3/` tree.
 
 ## Repo hygiene
 
